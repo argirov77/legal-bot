@@ -6,6 +6,11 @@ from app.vectorstore import ChunkSearchResult, ChunkVectorStore, get_vector_stor
 
 app = FastAPI(title="Legal Bot API")
 
+# include ingest router
+from app.ingest import router as ingest_router
+
+app.include_router(ingest_router)
+
 
 @app.get("/", response_class=PlainTextResponse)
 def read_root() -> str:
