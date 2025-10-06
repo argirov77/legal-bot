@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI
+from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
 app = FastAPI(title="Legal Bot API")
