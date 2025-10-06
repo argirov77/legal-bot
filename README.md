@@ -34,6 +34,13 @@
    # ok
    ```
 
+4. Выполните тестовый запрос к векторному поиску (после наполнения БД чанками):
+   ```bash
+   curl -X POST "http://localhost:8000/query" \
+        -H "Content-Type: application/json" \
+        -d '{"text": "пример запроса", "k": 5}'
+   ```
+
 ## Разработка без Docker
 
 ```bash
