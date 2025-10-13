@@ -15,7 +15,6 @@ import chromadb
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
-from chromadb.errors import NotEnoughElementsException
 
 from app.embeddings import EmbeddingModel, get_embedding_model
 from app.ingest.models import DocumentChunk
@@ -108,25 +107,22 @@ class ChunkVectorStore:
         if k <= 0:
             return []
 
-        if self.collection.count() == 0:
+        available_results = self.collection.count()
+        if available_results == 0:
             return []
 
         query_embeddings = self.embedding_model.embed_texts([text])
         if not query_embeddings:
             return []
         query_embedding = query_embeddings[0]
-        try:
-            result = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=k,
-                include=["metadatas", "documents", "distances", "ids"],
-            )
-        except NotEnoughElementsException:
-            result = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=1,
-                include=["metadatas", "documents", "distances", "ids"],
-            )
+        n_results = min(k, available_results)
+        if n_results <= 0:
+            return []
+        result = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=n_results,
+            include=["metadatas", "documents", "distances", "ids"],
+        )
 
         ids = result.get("ids", [[]])[0]
         documents = result.get("documents", [[]])[0]
