@@ -8,30 +8,24 @@ from pathlib import Path
 from .chroma_store import ChromaStore
 from .mock_store import MockQueryResult, MockVectorStore
 
-_MODULE_NAME = "app._vectorstore_impl"
-_MODULE_PATH = Path(__file__).resolve().parent.parent / "vectorstore.py"
+_VECTORSTORE_PATH = Path(__file__).resolve().parent.parent / "vectorstore.py"
+_SPEC = importlib.util.spec_from_file_location("app._vectorstore_module", _VECTORSTORE_PATH)
+if _SPEC and _SPEC.loader:  # pragma: no branch - defensive
+    _MODULE = importlib.util.module_from_spec(_SPEC)
+    sys.modules.setdefault("app._vectorstore_module", _MODULE)
+    _SPEC.loader.exec_module(_MODULE)
+else:  # pragma: no cover - loader resolution failure should not happen
+    raise ImportError(f"Unable to load vectorstore module from {_VECTORSTORE_PATH}")
 
-if _MODULE_NAME in sys.modules:
-    _module = sys.modules[_MODULE_NAME]
-else:
-    spec = importlib.util.spec_from_file_location(_MODULE_NAME, _MODULE_PATH)
-    if spec is None or spec.loader is None:  # pragma: no cover - defensive
-        raise ImportError(f"Cannot load vectorstore module from {_MODULE_PATH}")
-    _module = importlib.util.module_from_spec(spec)
-    sys.modules[_MODULE_NAME] = _module
-    spec.loader.exec_module(_module)
-
-ChunkSearchResult = _module.ChunkSearchResult  # type: ignore[attr-defined]
-ChunkVectorStore = _module.ChunkVectorStore  # type: ignore[attr-defined]
-get_vector_store = _module.get_vector_store  # type: ignore[attr-defined]
-reset_vector_store_cache = _module.reset_vector_store_cache  # type: ignore[attr-defined]
+ChunkVectorStore = _MODULE.ChunkVectorStore
+ChunkSearchResult = _MODULE.ChunkSearchResult
+get_vector_store = _MODULE.get_vector_store
 
 __all__ = [
     "ChromaStore",
-    "ChunkSearchResult",
-    "ChunkVectorStore",
-    "MockQueryResult",
     "MockVectorStore",
+    "MockQueryResult",
+    "ChunkVectorStore",
+    "ChunkSearchResult",
     "get_vector_store",
-    "reset_vector_store_cache",
 ]
