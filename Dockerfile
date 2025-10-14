@@ -26,19 +26,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip setuptools wheel
 
-# Install light requirements by default, heavy deps are optional
+# Prepare a light requirements file so dev builds can skip heavy dependencies.
 RUN python - <<'PY'
 from pathlib import Path
 import re
-req = Path('/app/requirements.txt').read_text().splitlines()
-light = [line for line in req if not re.match(r'\s*(torch|transformers|bitsandbytes|accelerate)(\b|==)', line)]
+req_path = Path('/app/requirements.txt')
+heavy = re.compile(r"\s*(torch|transformers|bitsandbytes|accelerate)(\b|==)")
+light = [line for line in req_path.read_text().splitlines() if not heavy.match(line)]
 Path('/app/requirements-light.txt').write_text('\n'.join(light) + ('\n' if light else ''))
 PY
-RUN pip install --no-cache-dir -r /app/requirements-light.txt
+
+# Install dependencies from requirements.txt, optionally skipping heavy packages.
 RUN if [ "$INSTALL_HEAVY" = "true" ]; then \
-        pip install --no-cache-dir torch[cuda] transformers bitsandbytes accelerate; \
+        pip install --no-cache-dir -r /app/requirements.txt; \
     else \
-        echo "Skipping heavy dependencies"; \
+        pip install --no-cache-dir -r /app/requirements-light.txt; \
     fi
 
 # copy sources
