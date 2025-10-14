@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field
 
 from app.vectorstore import ChunkSearchResult, ChunkVectorStore, get_vector_store
 
+# TODO: Wire LLMProvider dependency to expose BgGPT/Gemma completion endpoints.
+
 app = FastAPI(title="Legal Bot API")
 
 # include ingest router

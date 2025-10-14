@@ -38,6 +38,7 @@ class IngestPipeline:
         self.chunker = SemanticTextChunker(
             ChunkingConfig(chunk_chars=self.config.chunk_chars, overlap_chars=self.config.overlap_chars)
         )
+        # TODO: Inject LLMProvider once available to enrich chunks with BgGPT/Gemma metadata.
         self.language_detector = LanguageDetector()
 
     def ingest(
