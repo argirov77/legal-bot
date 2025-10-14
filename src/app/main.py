@@ -2,7 +2,10 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
+from app.logging_config import configure_logging
 from app.vectorstore import ChunkSearchResult, ChunkVectorStore, get_vector_store
+
+configure_logging()
 
 app = FastAPI(title="Legal Bot API")
 

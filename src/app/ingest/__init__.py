@@ -1,5 +1,5 @@
-import os
 import io
+import os
 import uuid
 import time
 import subprocess
@@ -15,6 +15,8 @@ from chromadb.config import Settings
 from pdfminer.high_level import extract_text_to_fp
 from docx import Document
 
+from app.logging_config import get_ingest_audit_logger
+
 # config via env
 CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "/chroma_db")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")  # change to BGE when available
@@ -28,6 +30,7 @@ embedder = SentenceTransformer(EMBEDDING_MODEL)
 chroma_client = chromadb.Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory=CHROMA_PERSIST_DIR))
 
 router = APIRouter()
+audit_logger = get_ingest_audit_logger()
 
 # helpers -------------------------------------------------
 def save_upload_to_disk(session_id: str, upload: UploadFile) -> str:
@@ -133,6 +136,17 @@ async def ingest(session_id: str, files: List[UploadFile] = File(...)):
 
         # chunk and embed
         chunks = chunk_text(text)
+        chunk_count = len(chunks)
+
+        audit_logger.info(
+            "ingest_file",
+            extra={
+                "session_id": session_id,
+                "audit_filename": os.path.basename(saved_path),
+                "chunks": chunk_count,
+            },
+        )
+
         if not chunks:
             continue
         embeddings = embedder.encode(chunks, show_progress_bar=False)
