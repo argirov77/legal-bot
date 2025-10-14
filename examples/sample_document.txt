@@ -1,0 +1,2 @@
+This is a sample document for the Legal Bot RAG demo.
+It contains a couple of sentences so the mock vector store has something to ingest.
