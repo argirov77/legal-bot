@@ -57,6 +57,33 @@ ruff check src tests
 pytest
 ```
 
+## Пример использования адаптеров провайдеров
+
+Псевдокод ниже демонстрирует планируемый способ обращения к унифицированным
+адаптерам. Благодаря единым интерфейсам orchestration-слой сможет выбирать
+конкретные реализации провайдеров без изменения бизнес-логики.
+
+```python
+from app.providers import EmbeddingProvider, LLMProvider, VectorStoreAdapter
+
+embedding_provider: EmbeddingProvider = get_embedding_provider()
+vector_store: VectorStoreAdapter = get_vector_store_adapter()
+llm: LLMProvider = get_llm_provider()
+
+question = "Какие условия расторжения в договоре?"
+question_embedding = embedding_provider.encode([question])[0]
+
+results = vector_store.query(
+    collection="contracts",
+    query_embedding=question_embedding,
+    k=3,
+)
+
+context = "\n".join(hit.document for hit in results)
+prompt = f"{context}\n\nВопрос: {question}\nОтвет:"
+answer = llm.generate(prompt, max_tokens=200, temperature=0.1)
+```
+
 ## Переменные окружения
 
 | Переменная            | Назначение                                |
