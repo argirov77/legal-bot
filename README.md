@@ -28,6 +28,10 @@
    ```bash
    docker compose up --build
    ```
+   > При наличии GPU можно дополнительно подключить конфигурацию `docker-compose.gpu.yml`:
+   > ```bash
+   > docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+   > ```
 3. Проверьте health-check:
    ```bash
    curl http://localhost:8000/
