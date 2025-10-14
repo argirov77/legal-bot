@@ -8,6 +8,8 @@ fpdf2==2.7.8
 chromadb==0.4.24
 sentence-transformers==2.2.2
 torch==2.2.2
+numpy<2.0.0
+huggingface-hub<0.25.0
 python-multipart
 pdfminer.six
 ocrmypdf
