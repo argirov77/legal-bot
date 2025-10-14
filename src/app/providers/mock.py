@@ -1,17 +1,16 @@
 """Mock implementations of provider interfaces for testing."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
 class MockLLMProvider:
     """Deterministic language model provider used for tests."""
 
-    model_path: str | None = None
+    model_path: Optional[str] = None
 
-    def load(self, model_path: str | None = None) -> None:
+    def load(self, model_path: Optional[str] = None) -> None:
         """Simulate loading a model from disk."""
 
         self.model_path = model_path
