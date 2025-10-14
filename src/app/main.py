@@ -2,12 +2,12 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from app.vectorstore import ChunkSearchResult, ChunkVectorStore, get_vector_store
+from .vectorstore import ChunkSearchResult, ChunkVectorStore, get_vector_store
+from app.ingest import router as ingest_router
 
 app = FastAPI(title="Legal Bot API")
 
 # include ingest router
-from app.ingest import router as ingest_router
 
 app.include_router(ingest_router)
 

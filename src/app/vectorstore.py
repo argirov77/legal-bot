@@ -11,10 +11,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-import chromadb
-from chromadb.api import ClientAPI
-from chromadb.api.models.Collection import Collection
-from chromadb.config import Settings
+try:  # pragma: no cover - import guarding
+    import chromadb
+    from chromadb.api import ClientAPI
+    from chromadb.api.models.Collection import Collection
+    from chromadb.config import Settings
+except ModuleNotFoundError:  # pragma: no cover - exercised in tests via mocks
+    chromadb = None  # type: ignore[assignment]
+    ClientAPI = Any  # type: ignore[assignment]
+    Collection = Any  # type: ignore[assignment]
+    Settings = Any  # type: ignore[assignment]
 
 from app.embeddings import EmbeddingModel, get_embedding_model
 from app.ingest.models import DocumentChunk
@@ -42,6 +48,8 @@ class ChunkVectorStore:
         collection_name: str = "legal_chunks",
         distance_metric: str = "cosine",
         embedding_model: Optional[EmbeddingModel] = None,
+        client: Optional[ClientAPI] = None,
+        collection: Optional[Collection] = None,
     ) -> None:
         self.persist_dir = Path(
             persist_dir or os.getenv("CHROMA_PERSIST_DIR", Path("chroma_db"))
@@ -50,11 +58,21 @@ class ChunkVectorStore:
         self.collection_name = collection_name
         self.distance_metric = distance_metric
         self.embedding_model = embedding_model or get_embedding_model()
-        self._client = self._create_client(self.persist_dir)
-        self._collection = self._get_or_create_collection()
+        if client is not None:
+            self._client = client
+        else:
+            self._client = self._create_client(self.persist_dir)
+        if collection is not None:
+            self._collection = collection
+        else:
+            self._collection = self._get_or_create_collection()
 
     @staticmethod
     def _create_client(persist_dir: Path) -> ClientAPI:
+        if chromadb is None:  # pragma: no cover - validated via tests
+            raise RuntimeError(
+                "ChromaDB is not installed. Provide a client when constructing ChunkVectorStore."
+            )
         settings = Settings(
             chroma_db_impl="duckdb+parquet",
             anonymized_telemetry=False,

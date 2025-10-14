@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import List, Optional, Sequence
 
-from app.ingest.models import DocumentChunk
-from app.vectorstore import ChunkVectorStore
+from .models import DocumentChunk
+from ..vectorstore import ChunkVectorStore
 
 
 class ChunkEmbeddingPipeline:

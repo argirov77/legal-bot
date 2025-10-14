@@ -1,9 +1,13 @@
-"""Compatibility package exposing the FastAPI application.
+"""Compatibility package exposing the FastAPI application and modules."""
+import importlib
+import sys
 
-This shim allows running ``uvicorn app.main:app`` without requiring
-``src`` to be on the Python import path.  It simply re-exports the
-application object from the actual implementation under ``src/app``.
-"""
+vectorstore_module = importlib.import_module("src.app.vectorstore")
+sys.modules.setdefault("app.vectorstore", vectorstore_module)
+
+ingest_module = importlib.import_module("src.app.ingest")
+sys.modules.setdefault("app.ingest", ingest_module)
+
 from src.app.main import app
 
 __all__ = ["app"]

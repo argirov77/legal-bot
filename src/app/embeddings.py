@@ -7,7 +7,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
-from sentence_transformers import SentenceTransformer
+try:  # pragma: no cover - optional heavy dependency
+    from sentence_transformers import SentenceTransformer
+except Exception:  # pragma: no cover - exercised in tests via fallback
+    SentenceTransformer = None  # type: ignore[assignment]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,8 +63,11 @@ class EmbeddingModel:
         self._model = self._load_model(self.model_name)
 
     @staticmethod
-    def _load_model(model_name: str) -> SentenceTransformer:
+    def _load_model(model_name: str):  # type: ignore[override]
         LOGGER.info("Loading embedding model: %s", model_name)
+        if SentenceTransformer is None:
+            LOGGER.warning("sentence-transformers not available; using fallback embedder")
+            return _FallbackSentenceTransformer(model_name)
         return SentenceTransformer(model_name)
 
     def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:
@@ -74,11 +80,16 @@ class EmbeddingModel:
             convert_to_numpy=True,
             normalize_embeddings=self.normalize,
         )
-        return embeddings.tolist()
+        if hasattr(embeddings, "tolist"):
+            return embeddings.tolist()
+        return [list(map(float, embedding)) for embedding in embeddings]
 
     @property
     def dimension(self) -> int:
-        return int(self._model.get_sentence_embedding_dimension())
+        dimension = getattr(self._model, "get_sentence_embedding_dimension", None)
+        if callable(dimension):
+            return int(dimension())
+        return 1
 
 
 @lru_cache()
@@ -86,4 +97,16 @@ def get_embedding_model() -> EmbeddingModel:
     """Return a cached embedding model instance."""
 
     return EmbeddingModel()
+
+class _FallbackSentenceTransformer:
+    """Lightweight stand-in used when sentence-transformers is unavailable."""
+
+    def __init__(self, model_name: str = "fallback") -> None:
+        self.model_name = model_name
+
+    def encode(self, texts: Sequence[str], **_: object) -> List[List[float]]:  # pragma: no cover - trivial
+        return [[float(len(text))] for text in texts]
+
+    def get_sentence_embedding_dimension(self) -> int:  # pragma: no cover - trivial
+        return 1
 

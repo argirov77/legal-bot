@@ -1,19 +1,35 @@
-import os
 import io
-import uuid
-import time
+import os
 import subprocess
+import time
+import uuid
 from typing import List
 
-from fastapi import APIRouter, UploadFile, File
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from sentence_transformers import SentenceTransformer
-import chromadb
-from chromadb.config import Settings
+try:  # pragma: no cover - optional heavy dependencies
+    from sentence_transformers import SentenceTransformer
+except Exception:  # pragma: no cover - exercised via tests
+    SentenceTransformer = None  # type: ignore[assignment]
 
-from pdfminer.high_level import extract_text_to_fp
-from docx import Document
+try:  # pragma: no cover - optional heavy dependencies
+    import chromadb
+    from chromadb.config import Settings
+except Exception:  # pragma: no cover - exercised via tests
+    chromadb = None  # type: ignore[assignment]
+    Settings = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional heavy dependencies
+    from pdfminer.high_level import extract_text_to_fp as _extract_text_to_fp
+except ModuleNotFoundError:  # pragma: no cover - exercised via tests
+    def _extract_text_to_fp(*args, **kwargs):  # type: ignore[override]
+        raise RuntimeError("pdfminer.six is required for PDF processing")
+
+try:  # pragma: no cover - optional heavy dependencies
+    from docx import Document as _Document
+except ModuleNotFoundError:  # pragma: no cover - exercised via tests
+    _Document = None  # type: ignore[assignment]
 
 # config via env
 CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "/chroma_db")
@@ -24,8 +40,23 @@ OCR_LANG = os.environ.get("OCR_LANG", "eng")
 os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
 
 # init embedding model and chroma client
-embedder = SentenceTransformer(EMBEDDING_MODEL)
-chroma_client = chromadb.Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory=CHROMA_PERSIST_DIR))
+if SentenceTransformer is not None:  # pragma: no branch - simple guard
+    try:
+        embedder = SentenceTransformer(EMBEDDING_MODEL)
+    except Exception:  # pragma: no cover - exercised in tests when dependency unavailable
+        embedder = None
+else:  # pragma: no cover - exercised when dependency missing
+    embedder = None
+
+if chromadb is not None and Settings is not None:  # pragma: no branch - simple guard
+    try:
+        chroma_client = chromadb.Client(
+            Settings(chroma_db_impl="duckdb+parquet", persist_directory=CHROMA_PERSIST_DIR)
+        )
+    except Exception:  # pragma: no cover - exercised in tests when dependency unavailable
+        chroma_client = None
+else:  # pragma: no cover - exercised when dependency missing
+    chroma_client = None
 
 router = APIRouter()
 
@@ -44,7 +75,7 @@ def extract_text_from_pdf_bytes(pdf_path: str) -> str:
     out = io.StringIO()
     try:
         with open(pdf_path, "rb") as f:
-            extract_text_to_fp(f, out)
+            _extract_text_to_fp(f, out)
         text = out.getvalue()
         if text and len(text.strip()) > 20:
             return text
@@ -56,7 +87,7 @@ def extract_text_from_pdf_bytes(pdf_path: str) -> str:
         subprocess.run(["ocrmypdf", "-l", OCR_LANG, "--skip-text", pdf_path, ocred], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         out = io.StringIO()
         with open(ocred, "rb") as f:
-            extract_text_to_fp(f, out)
+            _extract_text_to_fp(f, out)
         text = out.getvalue()
         # optionally remove ocred file to save space
         try:
@@ -68,8 +99,10 @@ def extract_text_from_pdf_bytes(pdf_path: str) -> str:
         return ""
 
 def extract_text_from_docx(path: str) -> str:
+    if _Document is None:
+        return ""
     try:
-        doc = Document(path)
+        doc = _Document(path)
         return "\n".join([p.text for p in doc.paragraphs if p.text])
     except Exception:
         return ""
@@ -88,6 +121,8 @@ def chunk_text(text: str, chunk_size:int=2000, overlap:int=400):
 
 def get_or_create_collection(session_id: str):
     name = f"session_{session_id}"
+    if chroma_client is None:  # pragma: no cover - validated via tests
+        raise RuntimeError("Chroma client is not configured")
     try:
         return chroma_client.get_collection(name=name)
     except Exception:
@@ -105,6 +140,9 @@ async def ingest(session_id: str, files: List[UploadFile] = File(...)):
     start = time.time()
     saved = []
     total_chunks = 0
+    if embedder is None or chroma_client is None:  # pragma: no cover - validated via tests
+        raise HTTPException(status_code=503, detail="Vector store dependencies are unavailable")
+
     collection = get_or_create_collection(session_id)
 
     for upload in files:
