@@ -1,9 +1,9 @@
 import json
 import logging
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 
 class JsonFormatter(logging.Formatter):
@@ -33,8 +33,10 @@ class JsonFormatter(logging.Formatter):
     }
 
     def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
-        payload: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat().replace("+00:00", "Z"),
+        payload: Dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
