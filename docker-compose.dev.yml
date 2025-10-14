@@ -10,6 +10,7 @@ services:
     env_file:
       - .env
     volumes:
+      - ./src:/app
       - ./models:/models
       - chroma_db:/chroma_db
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
