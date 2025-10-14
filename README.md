@@ -61,10 +61,13 @@ pytest
 
 | Переменная            | Назначение                                |
 |-----------------------|-------------------------------------------|
-| `LLAMA_MODEL_PATH`    | Путь до модели LLaMA в контейнере         |
-| `EMBEDDING_MODEL`     | Имя используемой embedding-модели          |
-| `CHROMA_PERSIST_DIR`  | Директория для хранения ChromaDB          |
-| `OCR_LANG`            | Язык для OCR-процессинга                  |
+| `LLM_BG1_PATH`         | Путь до основной болгарской LLM-модели    |
+| `LLM_BG2_PATH`         | Альтернативная болгарская LLM-модель      |
+| `EMBEDDING_MODEL_PATH` | Путь к используемой embedding-модели      |
+| `CHROMA_PERSIST_DIR`   | Директория для хранения ChromaDB          |
+| `OCR_LANG`             | Код языка для OCR-процессинга             |
+| `INSTALL_HEAVY`        | Флаг установки тяжёлых зависимостей       |
+| `LLM_PROVIDER`         | Провайдер LLM (`transformers` или `mock`) |
 
 ## Лицензия
 
