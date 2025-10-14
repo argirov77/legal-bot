@@ -3,9 +3,12 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.api.rag import router as rag_router
+from app.logging_config import configure_logging
 from app.vectorstore import ChunkSearchResult, ChunkVectorStore, get_vector_store
 
 # TODO: Wire LLMProvider dependency to expose BgGPT/Gemma completion endpoints.
+
+configure_logging()
 
 app = FastAPI(title="Legal Bot API")
 app.include_router(rag_router)
