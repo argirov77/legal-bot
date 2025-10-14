@@ -1,19 +1,19 @@
+version: "3.8"
 services:
   app:
     build:
       context: .
       args:
-        INSTALL_HEAVY: "false"
-    container_name: legal-bot-app-dev
+        - INSTALL_HEAVY=false
+    image: legal-bot-dev:latest
+    container_name: legal-bot-dev
     ports:
       - "8000:8000"
     env_file:
       - .env
     volumes:
-      - ./src:/app
+      - ./:/app
       - ./models:/models
-      - chroma_db:/chroma_db
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-volumes:
-  chroma_db:
+      - ./chroma_db:/chroma_db
+    environment:
+      - PYTHONUNBUFFERED=1
