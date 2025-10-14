@@ -1,3 +1,5 @@
 """LLM module scaffolding for upcoming provider integration."""
 
-# TODO: expose LLMProvider factory once implementations are available.
+from .adapter import LLMAdapter, MockLLMAdapter, TransformersLLMAdapter
+
+__all__ = ["LLMAdapter", "MockLLMAdapter", "TransformersLLMAdapter"]
