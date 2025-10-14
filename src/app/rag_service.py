@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
@@ -155,6 +156,8 @@ class MockLLM:
 class RAGService:
     """Coordinate ingest and answer flows for RAG workflows using mock components."""
 
+    _AUDIT_LOGGER = logging.getLogger("app.ingest.audit")
+
     def __init__(
         self,
         *,
@@ -201,8 +204,10 @@ class RAGService:
             start = time.perf_counter()
             chunks = self.chunker.split(text)
             durations["chunk"] += time.perf_counter() - start
+            chunk_count = len(chunks)
 
             if not chunks:
+                self._log_ingest_audit(session_id, upload_file.filename, chunk_count)
                 continue
 
             start = time.perf_counter()
@@ -216,11 +221,23 @@ class RAGService:
             durations["store"] += time.perf_counter() - start
             added_chunks += len(chunk_ids)
 
+            self._log_ingest_audit(session_id, upload_file.filename, chunk_count)
+
         return {
             "added_chunks": added_chunks,
             "durations": durations,
             "files_processed": sum(1 for f in files if f is not None),
         }
+
+    def _log_ingest_audit(self, session_id: str, filename: str | None, chunks: int) -> None:
+        self._AUDIT_LOGGER.info(
+            {
+                "event": "ingest_file",
+                "session_id": session_id,
+                "filename": filename,
+                "chunks": chunks,
+            }
+        )
 
     async def answer(
         self,
