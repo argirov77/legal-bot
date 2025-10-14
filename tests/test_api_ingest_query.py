@@ -40,3 +40,37 @@ def test_ingest_then_query_returns_sources() -> None:
     first_source = query_payload["sources"][0]
     assert first_source["metadata"]["filename"] == "contract.txt"
     assert "agreement" in first_source["content"].lower()
+
+
+def test_query_prefers_most_recent_chunks() -> None:
+    service = RAGService()
+    app.dependency_overrides[get_rag_service] = lambda: service
+    client = TestClient(app)
+
+    try:
+        first_files = {
+            "files": ("initial.txt", b"Historical terms should be superseded.", "text/plain")
+        }
+        second_files = {
+            "files": ("update.txt", b"The latest addendum changes the outcome.", "text/plain")
+        }
+
+        first_ingest = client.post("/sessions/demo/ingest", files=first_files)
+        assert first_ingest.status_code == 200
+
+        second_ingest = client.post("/sessions/demo/ingest", files=second_files)
+        assert second_ingest.status_code == 200
+
+        query_response = client.post(
+            "/sessions/demo/query",
+            json={"question": "What is current?", "top_k": 1},
+        )
+        assert query_response.status_code == 200
+
+        payload = query_response.json()
+        assert payload["sources"], "Expected at least one retrieved chunk"
+        latest_source = payload["sources"][0]
+        assert latest_source["metadata"]["filename"] == "update.txt"
+        assert "latest addendum" in latest_source["content"].lower()
+    finally:
+        app.dependency_overrides.clear()

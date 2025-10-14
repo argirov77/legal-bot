@@ -105,7 +105,13 @@ class RAGService:
         """Return a deterministic answer composed from stored chunks."""
 
         session_chunks = self._sessions.get(session_id, [])
-        selected = session_chunks[:top_k] if top_k > 0 else []
+        if top_k > 0:
+            recent_chunks = session_chunks[-top_k:]
+            # ``recent_chunks`` maintains chronological order (oldest to newest).
+            # Reverse to rank the newest chunks first when constructing the answer.
+            selected = list(reversed(recent_chunks))
+        else:
+            selected = []
 
         combined = " ".join(chunk.content for chunk in selected).strip()
         if not combined:
