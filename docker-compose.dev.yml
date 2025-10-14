@@ -3,14 +3,8 @@ services:
     build:
       context: .
       args:
-        INSTALL_HEAVY: "true"
-    container_name: legal-bot-app
-    runtime: nvidia
-    device_requests:
-      - driver: nvidia
-        count: 2
-        capabilities:
-          - gpu
+        INSTALL_HEAVY: "false"
+    container_name: legal-bot-app-dev
     ports:
       - "8000:8000"
     env_file:
