@@ -20,47 +20,74 @@
 
 ## Быстрый старт
 
-1. Скопируйте файл переменных окружения:
+1. Скопируйте файл переменных окружения и при необходимости отредактируйте его:
    ```bash
    cp .env.example .env
    ```
-2. Запустите сервис:
-   ```bash
-   docker compose up --build
-   ```
-   > При наличии GPU можно дополнительно подключить конфигурацию `docker-compose.gpu.yml`:
-   > ```bash
-   > docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
-   > ```
-3. Проверьте health-check:
+2. Установите модели (см. раздел «[Где хранить модели](#где-хранить-модели)»).
+3. Запустите выбранный профиль Docker Compose (см. ниже).
+4. Проверьте health-check:
    ```bash
    curl http://localhost:8000/
    # ok
    ```
 
-4. Выполните тестовый запрос к векторному поиску (после наполнения БД чанками):
-   ```bash
-   curl -X POST "http://localhost:8000/query" \
-        -H "Content-Type: application/json" \
-        -d '{"text": "пример запроса", "k": 5}'
-   ```
+После запуска сервиса можно воспользоваться готовыми HTTP-запросами:
 
-## Локальная разработка с docker-compose.dev
+* Загрузка документа в сессию:
+  ```bash
+  curl -X POST "http://localhost:8000/sessions/demo-session/ingest" \
+       -F "files=@examples/sample_document.txt"
+  ```
+* Запрос по сессии:
+  ```bash
+  curl -X POST "http://localhost:8000/sessions/demo-session/query" \
+       -H "Content-Type: application/json" \
+       -d '{"question": "О чем документ?", "top_k": 3, "max_tokens": 128}'
+  ```
+
+## Профили Docker Compose
+
+### Разработка без GPU
+
+Команда запускает облегчённое окружение с автопересборкой исходников и CPU-only
+зависимостями:
+
+```bash
+docker compose -f docker-compose.nogpu.yml up --build
+```
+
+Альтернативно можно воспользоваться «горячей» сборкой для разработчиков, которая
+монтирует каталог `src/` и подготавливает среду для тестов:
 
 ```bash
 docker compose -f docker-compose.dev.yml up --build
 ```
 
-После запуска сервиса можно воспользоваться готовыми скриптами из папки `examples/`:
+### Продакшн / GPU-профиль
+
+Для полноценного окружения с поддержкой GPU используйте базовый compose-файл в
+сочетании с GPU-оверлеем. Перед запуском убедитесь, что установлен
+`nvidia-container-toolkit` и демон Docker настроен на использование GPU.
 
 ```bash
-./examples/01_ingest.sh  # загрузить пример документа
-./examples/02_query.sh   # задать вопрос к мок-ответу
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
 ```
 
-Скрипты принимают переменные окружения `BASE_URL`, `SESSION_ID`, а также дополнительные
-параметры (`QUESTION`, `TOP_K`, `MAX_TOKENS` для запроса), что позволяет быстро проверять
-моковые ответы API.
+Контейнер смонтирует локальные директории `./models` и `./chroma_db`, что позволяет
+повторно использовать скачанные модели и сохранённые эмбеддинги между перезапусками.
+
+### Готовые скрипты для smoke-тестов
+
+После поднятия контейнеров можно использовать вспомогательные сценарии:
+
+```bash
+./examples/01_ingest.sh  # загрузить пример документа в выбранную сессию
+./examples/02_query.sh   # выполнить запрос по ранее загруженным документам
+```
+
+Скрипты принимают переменные окружения `BASE_URL`, `SESSION_ID`, `QUESTION`, `TOP_K` и
+`MAX_TOKENS`, что упрощает отладку API.
 
 ## Разработка без Docker
 
@@ -105,17 +132,88 @@ prompt = f"{context}\n\nВопрос: {question}\nОтвет:"
 answer = llm.generate(prompt, max_tokens=200, temperature=0.1)
 ```
 
+## Где хранить модели
+
+Каталог `models/` примонтирован в контейнер по пути `/models`. Разместите в нём
+скачанные веса LLM и эмбеддингов:
+
+```
+models/
+├── all-MiniLM-L6-v2/           # эмбеддинги
+├── bgpt-7b/                    # основная LLM
+└── gemma-2-bg/                 # альтернативная LLM
+```
+
+Убедитесь, что имена директорий соответствуют путям в переменных окружения
+`EMBEDDING_MODEL_PATH`, `LLM_BG1_PATH` и `LLM_BG2_PATH`.
+
+## Наполнение (prefill) Chroma
+
+1. Установите `VECTOR_STORE=chroma` и при необходимости задайте `CHROMA_PERSIST_DIR` в
+   файле `.env`.
+2. Подготовьте корпус документов в каталоге, доступном контейнеру (например,
+   `./data/prefill`).
+3. После запуска контейнеров выполните скрипт, который пройдётся по файлам,
+   прогонит их через пайплайн и положит чанки в Chroma:
+
+   ```bash
+   docker compose exec legal-bot-app python - <<'PY'
+   from pathlib import Path
+   from app.ingest.pipeline import IngestPipeline
+   from app.vectorstore import get_vector_store
+
+   pipeline = IngestPipeline()
+   store = get_vector_store()
+
+   docs_dir = Path("/app/data/prefill")
+   for path in docs_dir.glob("**/*"):
+       if path.is_file():
+           chunks = pipeline.ingest(path.read_bytes(), path.name)
+           store.upsert_chunks(chunks)
+           print(f"Loaded {path}")
+   print("Prefill complete")
+   PY
+   ```
+
+   После выполнения скрипта персистентный каталог `chroma_db/` будет содержать
+   эмбеддинги, готовые к использованию API.
+
 ## Переменные окружения
 
-| Переменная            | Назначение                                |
-|-----------------------|-------------------------------------------|
-| `LLM_BG1_PATH`         | Путь до основной болгарской LLM-модели    |
-| `LLM_BG2_PATH`         | Альтернативная болгарская LLM-модель      |
-| `EMBEDDING_MODEL_PATH` | Путь к используемой embedding-модели      |
-| `CHROMA_PERSIST_DIR`   | Директория для хранения ChromaDB          |
-| `OCR_LANG`             | Код языка для OCR-процессинга             |
-| `INSTALL_HEAVY`        | Флаг установки тяжёлых зависимостей       |
-| `LLM_PROVIDER`         | Провайдер LLM (`transformers` или `mock`) |
+| Переменная              | Назначение                                                                 |
+|-------------------------|----------------------------------------------------------------------------|
+| `CHROMA_PERSIST_DIR`    | Путь до директории с персистентной базой Chroma (по умолчанию `./chroma_db`)|
+| `CHROMA_DB_IMPL`        | Реализация драйвера Chroma (`duckdb+parquet`, `duckdb` и т.д.)              |
+| `CHROMA_DISTANCE_METRIC`| Метрика расстояния для коллекции (например, `cosine`)                      |
+| `VECTOR_STORE`          | Используемый стор (`mock` или `chroma`)                                    |
+| `EMBEDDING_MODEL_PATH`  | Путь к модели эмбеддингов в папке `models/`                                 |
+| `EMBEDDING_DEVICE`      | Устройство для инференса эмбеддингов (`cpu`, `cuda`, `cuda:0` и т.п.)       |
+| `LLM_PROVIDER`          | Провайдер LLM (`transformers`, `mock`)                                     |
+| `LLM_BG1_PATH`          | Основная LLM модель                                                         |
+| `LLM_BG2_PATH`          | Альтернативная LLM модель                                                   |
+| `OCR_LANG`              | Язык для OCR в пайплайне (например, `bul`)                                 |
+| `INSTALL_HEAVY`         | Включение тяжёлых зависимостей при сборке контейнера                       |
+
+Дополнительные переменные можно посмотреть в `.env.example`.
+
+## Типичные команды для отладки
+
+```bash
+# Показать статус контейнеров
+docker compose ps
+
+# Смотреть логи приложения в реальном времени
+docker compose logs -f app
+
+# Выполнить команду внутри контейнера приложения
+docker compose exec app bash
+
+# Пересоздать окружение «с нуля»
+docker compose down -v && docker compose up --build
+
+# Проверить готовность API
+curl http://localhost:8000/healthz
+```
 
 ## Лицензия
 
