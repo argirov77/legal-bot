@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 from starlette.datastructures import UploadFile
+
+from app.llm_provider import DEFAULT_STUB_RESPONSE, LLM, LLMGenerationError, get_llm
+
+
+LOGGER = logging.getLogger(__name__)
+BG_NO_DATA_MESSAGE = "Нямам достатъчно информация в заредените документи."
+BG_MODEL_UNAVAILABLE_MESSAGE = DEFAULT_STUB_RESPONSE
 
 
 async def _maybe_await(result: Any) -> Any:
@@ -141,16 +149,61 @@ class PromptBuilder:
     """Build a simple prompt using retrieved chunks."""
 
     def build(self, question: str, chunks: Sequence[StoredChunk]) -> str:
-        context = "\n\n".join(chunk.content for chunk in chunks)
-        return f"Context:\n{context}\n\nQuestion: {question}"
+        cleaned_question = question.strip() or "(няма въпрос)"
+        bullet_lines: list[str] = []
+        for index, chunk in enumerate(chunks, start=1):
+            snippet = " ".join(chunk.content.split())
+            if snippet:
+                bullet_lines.append(f"{index}. {snippet}")
+        if not bullet_lines:
+            bullet_lines.append("Няма релевантен контекст.")
+        context = "\n".join(bullet_lines)
+        instructions = (
+            "Използвай предоставения контекст, за да отговориш на въпроса. "
+            "Ако контекстът не съдържа достатъчно информация, отговори точно "
+            "\"Нямам достатъчно информация в заредените документи.\""
+        )
+        return (
+            f"{instructions}\n\n"
+            f"Въпрос: {cleaned_question}\n\n"
+            f"Контекст:\n{context}\n\n"
+            "Отговор:"
+        )
 
 
-class MockLLM:
+class MockLLM(LLM):
     """Return a deterministic answer prefix for testing."""
 
-    async def generate(self, prompt: str, max_tokens: int) -> str:
+    def generate(self, prompt: str, max_tokens: int, temperature: float = 0.0) -> str:
         preview = prompt[:max_tokens]
         return f"MOCK_ANSWER: {preview}"
+
+
+def _heavy_dependencies_enabled() -> bool:
+    value = os.getenv("INSTALL_HEAVY", "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _int_from_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        LOGGER.warning("Invalid integer for %s: %s; using default %s", name, value, default)
+        return default
+
+
+def _float_from_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        LOGGER.warning("Invalid float for %s: %s; using default %s", name, value, default)
+        return default
 
 
 class RAGService:
@@ -168,7 +221,7 @@ class RAGService:
         vector_store: Optional[InMemoryVectorStore] = None,
         retriever: Optional[MockRetriever] = None,
         prompt_builder: Optional[PromptBuilder] = None,
-        llm: Optional[MockLLM] = None,
+        llm: Optional[LLM] = None,
     ) -> None:
         self.storage = storage or InMemoryStorage()
         self.text_extractor = text_extractor or PlainTextExtractor()
@@ -177,7 +230,10 @@ class RAGService:
         self.vector_store = vector_store or InMemoryVectorStore()
         self.retriever = retriever or MockRetriever(self.vector_store)
         self.prompt_builder = prompt_builder or PromptBuilder()
-        self.llm = llm or MockLLM()
+        self.llm = llm or get_llm()
+        self._heavy_enabled = _heavy_dependencies_enabled()
+        self._default_max_tokens = _int_from_env("LLM_MAX_TOKENS", 256)
+        self._default_temperature = _float_from_env("LLM_TEMPERATURE", 0.0)
 
     async def ingest(self, session_id: str, files: Sequence[UploadFile]) -> Dict[str, Any]:
         durations: Dict[str, float] = {
@@ -253,7 +309,23 @@ class RAGService:
         prompt = self.prompt_builder.build(question, retrieved_chunks)
 
         answer_start = time.perf_counter()
-        answer_text = await self.llm.generate(prompt, max_tokens)
+        effective_max_tokens = self._resolve_max_tokens(max_tokens)
+        if not retrieved_chunks:
+            answer_text = BG_NO_DATA_MESSAGE
+        elif not self._heavy_enabled:
+            answer_text = BG_MODEL_UNAVAILABLE_MESSAGE
+        else:
+            try:
+                answer_text = await _maybe_await(
+                    self.llm.generate(
+                        prompt,
+                        max_tokens=effective_max_tokens,
+                        temperature=self._default_temperature,
+                    )
+                )
+            except LLMGenerationError as error:
+                LOGGER.exception("LLM generation failed for session %s", session_id)
+                raise RuntimeError("Неуспешно генериране на отговор от LLM") from error
         answer_duration = time.perf_counter() - answer_start
 
         sources: List[Dict[str, Any]] = [
@@ -275,6 +347,13 @@ class RAGService:
                     "retrieve": retrieve_duration,
                     "generate": answer_duration,
                 },
+                "max_tokens": effective_max_tokens,
+                "temperature": self._default_temperature,
             },
         }
+
+    def _resolve_max_tokens(self, max_tokens: int | None) -> int:
+        if max_tokens is None or max_tokens <= 0:
+            return self._default_max_tokens
+        return max_tokens
 

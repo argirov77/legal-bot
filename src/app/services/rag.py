@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List
@@ -11,6 +12,7 @@ from fastapi import UploadFile
 
 from app.ingest.models import DocumentChunk
 from app.ingest.pipeline import IngestPipeline, IngestPipelineConfig
+from app.llm_provider import DEFAULT_STUB_RESPONSE, LLMGenerationError, get_llm
 from app.storage import save_upload
 from app.vectorstore import (
     ChunkSearchResult,
@@ -22,13 +24,35 @@ from app.vectorstore import (
 LOGGER = logging.getLogger(__name__)
 AUDIT_LOGGER = logging.getLogger("app.ingest.audit")
 
-BG_NO_DATA_MESSAGE = "Съжалявам — няма достатъчно информация в заредените документи."
-BG_MODEL_UNAVAILABLE_MESSAGE = "Моделата локално не е налична."
+BG_NO_DATA_MESSAGE = "Нямам достатъчно информация в заредените документи."
+BG_MODEL_UNAVAILABLE_MESSAGE = DEFAULT_STUB_RESPONSE
 
 
 def _heavy_dependencies_enabled() -> bool:
     flag = os.getenv("INSTALL_HEAVY", "false").strip().lower()
     return flag not in {"0", "false", "no", "off"}
+
+
+def _int_from_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        LOGGER.warning("Invalid integer for %s: %s; using default %s", name, value, default)
+        return default
+
+
+def _float_from_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        LOGGER.warning("Invalid float for %s: %s; using default %s", name, value, default)
+        return default
 
 
 @dataclass(slots=True)
@@ -76,6 +100,9 @@ class RAGService:
         self.pipeline = pipeline or IngestPipeline(IngestPipelineConfig())
         self._vector_store = vector_store or get_vector_store()
         self._heavy_enabled = heavy_enabled if heavy_enabled is not None else _heavy_dependencies_enabled()
+        self._default_max_tokens = _int_from_env("LLM_MAX_TOKENS", 256)
+        self._default_temperature = _float_from_env("LLM_TEMPERATURE", 0.0)
+        self._recent_chunks: dict[str, List[DocumentChunk]] = {}
 
     async def ingest(self, session_id: str, files: Iterable[UploadFile]) -> IngestResult:
         start_time = time.perf_counter()
@@ -133,13 +160,35 @@ class RAGService:
     ) -> AnswerResult:
         results = self._query_chunks(session_id, question, top_k)
         stored_chunks = [self._convert_result(result) for result in results]
+        LOGGER.debug(
+            "Query for session %s returned %d results (stored=%d)",
+            session_id,
+            len(results),
+            len(stored_chunks),
+        )
+
+        effective_max_tokens = self._resolve_max_tokens(max_tokens)
+
+        if not stored_chunks:
+            stored_chunks = self._fallback_chunks(session_id, top_k)
 
         if not stored_chunks:
             answer_text = BG_NO_DATA_MESSAGE
         elif not self._heavy_enabled:
             answer_text = BG_MODEL_UNAVAILABLE_MESSAGE
         else:
-            answer_text = self._compose_answer(question, stored_chunks, max_tokens)
+            prompt = self._build_generation_prompt(question, stored_chunks)
+            llm = get_llm()
+            temperature = self._default_temperature
+            try:
+                answer_text = llm.generate(
+                    prompt,
+                    max_tokens=effective_max_tokens,
+                    temperature=temperature,
+                )
+            except LLMGenerationError as error:
+                LOGGER.exception("LLM generation failed for session %s", session_id)
+                raise RuntimeError("Неуспешно генериране на отговор от LLM") from error
 
         AUDIT_LOGGER.info(
             {
@@ -154,7 +203,7 @@ class RAGService:
             session_id=session_id,
             question=question,
             top_k=top_k,
-            max_tokens=max_tokens,
+            max_tokens=effective_max_tokens,
             answer=answer_text,
             sources=stored_chunks,
         )
@@ -176,6 +225,7 @@ class RAGService:
         except Exception as error:  # pragma: no cover - defensive guard
             LOGGER.exception("Unexpected error while persisting chunks")
             raise VectorStoreUnavailableError("Failed to persist chunks", cause=error) from error
+        self._recent_chunks[session_id] = list(chunks)
 
     def _query_chunks(self, session_id: str, question: str, top_k: int) -> List[ChunkSearchResult]:
         search_k = max(top_k * 5, top_k + 5)
@@ -202,33 +252,64 @@ class RAGService:
         metadata["score"] = score
         return StoredChunk(id=result.id, content=result.content, metadata=metadata, score=score)
 
-    def _compose_answer(
-        self,
-        question: str,
-        chunks: List[StoredChunk],
-        max_tokens: int | None,
-    ) -> str:
+    def _build_generation_prompt(self, question: str, chunks: List[StoredChunk]) -> str:
         cleaned_question = question.strip() or "(няма въпрос)"
-        lines = [
-            f"Въз основа на заредените документи за въпроса „{cleaned_question}“ намерих:"  # noqa: B950
-        ]
-        for chunk in chunks:
+        bullet_lines: list[str] = []
+        for index, chunk in enumerate(chunks, start=1):
             snippet = " ".join(chunk.content.split())
             if snippet:
-                lines.append(f"- {snippet}")
-        if len(lines) == 1:
-            lines.append("Контекстът не съдържа достатъчно информация.")
-        answer = "\n".join(lines)
-        return self._truncate_to_tokens(answer, max_tokens)
+                bullet_lines.append(f"{index}. {snippet}")
+        if not bullet_lines:
+            bullet_lines.append("Няма релевантен контекст.")
+        context_block = "\n".join(bullet_lines)
+        instructions = (
+            "Използвай предоставения контекст, за да отговориш на въпроса. "
+            "Ако контекстът не съдържа достатъчно информация, отговори точно "
+            "\"Нямам достатъчно информация в заредените документи.\""
+        )
+        return (
+            f"{instructions}\n\n"
+            f"Въпрос: {cleaned_question}\n\n"
+            f"Контекст:\n{context_block}\n\n"
+            "Отговор:"
+        )
+
+    def _resolve_max_tokens(self, max_tokens: int | None) -> int:
+        if max_tokens is None or max_tokens <= 0:
+            return self._default_max_tokens
+        return max_tokens
+
+    def _fallback_chunks(self, session_id: str, top_k: int) -> List[StoredChunk]:
+        recent = self._recent_chunks.get(session_id, [])
+        if not recent:
+            return []
+
+        fallback_chunks: List[StoredChunk] = []
+        for chunk in recent[: max(top_k, 1)]:
+            metadata = {
+                "session_id": session_id,
+                "file_name": chunk.metadata.file_name,
+                "page": chunk.metadata.page,
+                "chunk_index": chunk.metadata.chunk_index,
+                "char_start": chunk.metadata.char_start,
+                "char_end": chunk.metadata.char_end,
+                "language": chunk.metadata.language,
+                "distance": 1.0,
+                "score": 0.0,
+            }
+            chunk_id = self._make_chunk_id(chunk)
+            fallback_chunks.append(
+                StoredChunk(id=chunk_id, content=chunk.content, metadata=metadata, score=0.0)
+            )
+        return fallback_chunks
 
     @staticmethod
-    def _truncate_to_tokens(text: str, max_tokens: int | None) -> str:
-        if not max_tokens or max_tokens <= 0:
-            return text
-        tokens = text.split()
-        if len(tokens) <= max_tokens:
-            return text
-        return " ".join(tokens[:max_tokens])
+    def _make_chunk_id(chunk: DocumentChunk) -> str:
+        metadata = chunk.metadata
+        seed = (
+            f"{metadata.file_id}:{metadata.chunk_index}:{metadata.char_start}:{metadata.char_end}:{metadata.file_name}"
+        )
+        return uuid.uuid5(uuid.NAMESPACE_URL, seed).hex
 
 
 _rag_service = RAGService()
