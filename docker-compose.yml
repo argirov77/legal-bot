@@ -1,19 +1,21 @@
+version: "3.9"
+
 services:
   app:
     build:
       context: .
       args:
-        INSTALL_HEAVY: "true"
+        INSTALL_HEAVY: ${INSTALL_HEAVY:-false}
     container_name: legal-bot-app
-    ports:
-      - "8000:8000"
+    runtime: nvidia
     env_file:
       - .env
-    environment:
-      - PYTHONPATH=/app/src
+    ports:
+      - "8000:8000"
     volumes:
       - ./models:/models
       - ./chroma_db:/chroma_db
+      - ./src:/app/src
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/healthz || exit 1"]

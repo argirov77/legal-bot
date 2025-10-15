@@ -25,6 +25,7 @@ class ChunkMetadata:
     char_start: int
     char_end: int
     language: Optional[str]
+    session_id: Optional[str] = None
 
 
 @dataclass(slots=True)

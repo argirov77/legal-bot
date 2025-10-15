@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Protocol, Sequence
 
 from app.ingest.models import DocumentChunk
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,80 @@ class MockVectorStore:
         return _MockCollection(self._collections[name])
 
 
+class PersistentMockVectorStore(MockVectorStore):
+    """Mock vector store that persists its state on disk for reuse."""
+
+    def __init__(self, persist_dir: Path) -> None:
+        super().__init__()
+        self._persist_dir = Path(persist_dir)
+        self._persist_dir.mkdir(parents=True, exist_ok=True)
+        self._data_path = self._persist_dir / "mock_store.json"
+        self._load()
+
+    def create_collection(self, name: str, *, metadata: Optional[Dict[str, object]] = None) -> _MockCollection:
+        collection = super().create_collection(name, metadata=metadata)
+        self._save()
+        return collection
+
+    def add(
+        self,
+        name: str,
+        *,
+        ids: Iterable[str],
+        embeddings: Iterable[Sequence[float]],
+        documents: Iterable[str],
+        metadatas: Iterable[dict | None] | None = None,
+    ) -> None:
+        super().add(
+            name,
+            ids=ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas,
+        )
+        self._save()
+
+    def _load(self) -> None:
+        if not self._data_path.exists():
+            return
+        try:
+            payload = json.loads(self._data_path.read_text(encoding="utf-8"))
+        except Exception:
+            LOGGER.warning("Failed to load mock vector store from %s", self._data_path)
+            return
+
+        for name, records in payload.items():
+            collection = self._collections.setdefault(name, [])
+            for record in records:
+                try:
+                    collection.append(
+                        _MockStoredItem(
+                            id=str(record.get("id", "")),
+                            embedding=[float(value) for value in record.get("embedding", [])],
+                            document=str(record.get("document", "")),
+                            metadata=dict(record.get("metadata", {})),
+                        )
+                    )
+                except Exception:
+                    continue
+
+    def _save(self) -> None:
+        payload: Dict[str, List[dict]] = {}
+        for name, items in self._collections.items():
+            payload[name] = [
+                {
+                    "id": item.id,
+                    "embedding": list(map(float, item.embedding)),
+                    "document": item.document,
+                    "metadata": dict(item.metadata),
+                }
+                for item in items
+            ]
+        tmp_path = self._data_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(self._data_path)
+
+
 class _DeterministicEmbeddingModel:
     """Fallback embedding model that operates without external dependencies."""
 
@@ -234,6 +311,7 @@ class InMemoryChunkVectorStore:
                 "char_start": metadata.char_start,
                 "char_end": metadata.char_end,
                 "language": metadata.language,
+                "session_id": getattr(metadata, "session_id", None),
                 "content_length": len(chunk.content),
             }
             metadatas.append(metadata_dict)
@@ -305,4 +383,5 @@ __all__ = [
     "InMemoryChunkVectorStore",
     "MockQueryResult",
     "MockVectorStore",
+    "PersistentMockVectorStore",
 ]

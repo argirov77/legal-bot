@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.services.rag import AnswerResult, IngestResult, RAGService, StoredChunk, get_rag_service
+from app.vectorstore import VectorStoreUnavailableError
 
 router = APIRouter(prefix="/sessions", tags=["rag"])
 
@@ -69,10 +70,14 @@ async def _run_ingest(
 
 
 def _serialise_sources(chunks: list[StoredChunk]) -> list[AnswerSource]:
-    return [
-        AnswerSource(id=chunk.id, content=chunk.content, metadata=dict(chunk.metadata))
-        for chunk in chunks
-    ]
+    serialised: list[AnswerSource] = []
+    for chunk in chunks:
+        metadata = dict(chunk.metadata)
+        metadata.setdefault("score", chunk.score)
+        if "filename" not in metadata and "file_name" in metadata:
+            metadata["filename"] = metadata["file_name"]
+        serialised.append(AnswerSource(id=chunk.id, content=chunk.content, metadata=metadata))
+    return serialised
 
 
 @router.post("/{session_id}/ingest", response_model=IngestResponse)
@@ -86,7 +91,12 @@ async def ingest_documents(
     if not files:
         raise HTTPException(status_code=400, detail="At least one file must be provided")
 
-    return await _run_ingest(session_id, files, rag_service)
+    try:
+        return await _run_ingest(session_id, files, rag_service)
+    except VectorStoreUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/{session_id}/query", response_model=QueryResponse)
@@ -100,12 +110,15 @@ async def query_documents(
     if not request.question.strip():
         raise HTTPException(status_code=422, detail="Question must not be empty")
 
-    result: AnswerResult = rag_service.answer(
-        session_id,
-        request.question,
-        top_k=request.top_k,
-        max_tokens=request.max_tokens,
-    )
+    try:
+        result: AnswerResult = rag_service.answer(
+            session_id,
+            request.question,
+            top_k=request.top_k,
+            max_tokens=request.max_tokens,
+        )
+    except VectorStoreUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return QueryResponse(
         session_id=result.session_id,
         question=result.question,
