@@ -183,7 +183,7 @@ class TransformersLLM(LLM):
                     "PyTorch/Transformers are not available in the current environment"
                 ) from _IMPORT_ERROR
 
-            LOGGER.info("Loading LLM from %s", self._config.model_path)
+            LOGGER.info("loading model... (source=%s)", self._config.model_path)
             device_map, device_label = _resolve_device_map(self._config.device_strategy)
 
             try:
@@ -243,6 +243,7 @@ class TransformersLLM(LLM):
 
             self._model = model
             self._tokenizer = tokenizer
+            LOGGER.info("model loaded on %s", self._device_label)
 
     def _build_prompt(self, user_prompt: str) -> str:
         user_content = user_prompt.strip()
@@ -254,7 +255,7 @@ class TransformersLLM(LLM):
         try:
             self._ensure_loaded()
         except LLMNotReadyError as error:  # pragma: no cover - depends on env
-            LOGGER.warning("Falling back to LLM stub because loading failed: %s", error)
+            LOGGER.warning("falling back to stub: %s", error)
             return self._stub.generate(prompt, max_tokens, temperature)
 
         if self._model is None or self._tokenizer is None:
