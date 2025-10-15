@@ -1,27 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
 
 import pytest
 
 from app.ingest.embedding_pipeline import ChunkEmbeddingPipeline
 from app.ingest.models import ChunkMetadata, DocumentChunk
-from app.vectorstore import ChunkSearchResult, ChunkVectorStore
-
-
-@dataclass
-class _DummyEmbeddingModel:
-    """Simple deterministic embedding model used for tests."""
-
-    def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:  # pragma: no cover - trivial
-        return [[float(len(text))] for text in texts]
+from app.vectorstore import ChunkSearchResult, get_vector_store, reset_vector_store_cache
 
 
 @pytest.fixture()
-def vector_store(tmp_path: Path) -> ChunkVectorStore:
-    return ChunkVectorStore(persist_dir=tmp_path / "chroma", distance_metric="l2", embedding_model=_DummyEmbeddingModel())
+def vector_store(monkeypatch: pytest.MonkeyPatch) -> object:
+    monkeypatch.setenv("VECTOR_STORE", "mock")
+    reset_vector_store_cache()
+    store = get_vector_store()
+    yield store
+    reset_vector_store_cache()
 
 
 def _make_chunk(index: int, content: str = "Example text", file_id: str = "file-1") -> DocumentChunk:
@@ -37,7 +31,7 @@ def _make_chunk(index: int, content: str = "Example text", file_id: str = "file-
     return DocumentChunk(content=content, metadata=metadata)
 
 
-def test_upsert_and_query_returns_results(vector_store: ChunkVectorStore) -> None:
+def test_upsert_and_query_returns_results(vector_store: object) -> None:
     chunks = [
         _make_chunk(0, content="short"),
         _make_chunk(1, content="a little bit longer"),
@@ -54,7 +48,7 @@ def test_upsert_and_query_returns_results(vector_store: ChunkVectorStore) -> Non
     assert isinstance(results[0], ChunkSearchResult)
 
 
-def test_create_snapshot_creates_directory(vector_store: ChunkVectorStore, tmp_path: Path) -> None:
+def test_create_snapshot_creates_directory(vector_store: object, tmp_path: Path) -> None:
     vector_store.upsert_chunks([_make_chunk(0)])
 
     snapshot_root = tmp_path / "snapshots"
