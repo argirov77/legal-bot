@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM python:3.11-slim AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -22,8 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libtiff5-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-dev.txt ./
-RUN pip install --upgrade pip setuptools wheel
+COPY requirements.txt requirements-dev.txt constraints.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip pip install --upgrade pip setuptools wheel
 
 # Prepare a light requirements file so dev builds can skip heavy dependencies.
 RUN python - <<'PY'
@@ -37,12 +38,13 @@ PY
 
 FROM base AS dev
 ARG INSTALL_HEAVY=false
-RUN if [ "$INSTALL_HEAVY" = "true" ]; then \
-        pip install --no-cache-dir -r /app/requirements.txt; \
+RUN --mount=type=cache,target=/root/.cache/pip bash -c '\
+    if [ "$INSTALL_HEAVY" = "true" ]; then \
+        pip install --no-cache-dir -c /app/constraints.txt -r /app/requirements.txt; \
     else \
-        pip install --no-cache-dir -r /app/requirements-light.txt; \
-    fi
-RUN pip install --no-cache-dir -r /app/requirements-dev.txt
+        pip install --no-cache-dir -c /app/constraints.txt -r /app/requirements-light.txt; \
+    fi'
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-cache-dir -c /app/constraints.txt -r /app/requirements-dev.txt
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY src/ /app/src/
 RUN mkdir -p /models /chroma_db /data
@@ -53,11 +55,12 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 FROM base AS prod
 ARG INSTALL_HEAVY=true
-RUN if [ "$INSTALL_HEAVY" = "true" ]; then \
-        pip install --no-cache-dir -r /app/requirements.txt; \
+RUN --mount=type=cache,target=/root/.cache/pip bash -c '\
+    if [ "$INSTALL_HEAVY" = "true" ]; then \
+        pip install --no-cache-dir -c /app/constraints.txt -r /app/requirements.txt; \
     else \
-        pip install --no-cache-dir -r /app/requirements-light.txt; \
-    fi
+        pip install --no-cache-dir -c /app/constraints.txt -r /app/requirements-light.txt; \
+    fi'
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY src/ /app/src/
 RUN mkdir -p /models /chroma_db /data

@@ -8,6 +8,17 @@ import chromadb
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 
+try:  # pragma: no cover - depends on chromadb internals
+    from chromadb.errors import NotEnoughElementsException
+except ImportError:  # pragma: no cover - fallback for older versions
+    try:
+        from chromadb.api.types import NotEnoughElementsException  # type: ignore[attr-defined]
+    except ImportError:  # pragma: no cover - ultimate fallback
+        class NotEnoughElementsException(Exception):
+            """Fallback exception when Chroma does not expose the expected error."""
+
+from .errors import VectorStoreUnavailableError
+
 
 class ChromaStore:
     """Adapter around a Chroma vector database."""
@@ -20,7 +31,13 @@ class ChromaStore:
     ) -> None:
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
-        self._client: ClientAPI = client or chromadb.PersistentClient(path=str(self.persist_dir))
+        try:
+            self._client: ClientAPI = client or chromadb.PersistentClient(path=str(self.persist_dir))
+        except Exception as exc:  # pragma: no cover - depends on chromadb runtime
+            raise VectorStoreUnavailableError(
+                "Failed to initialise Chroma persistent client",
+                cause=exc,
+            ) from exc
         self._collections: Dict[str, Collection] = {}
 
     def create_collection(self, name: str, *, metadata: Optional[Dict[str, Any]] = None) -> Collection:
@@ -81,7 +98,13 @@ class ChromaStore:
             return []
 
         collection = self.create_collection(name)
-        result = collection.query(query_embeddings=[list(map(float, query_embedding))], n_results=k)
+        try:
+            result = collection.query(
+                query_embeddings=[list(map(float, query_embedding))],
+                n_results=k,
+            )
+        except NotEnoughElementsException:
+            return []
 
         ids = (result.get("ids") or [[]])[0]
         documents = (result.get("documents") or [[]])[0]

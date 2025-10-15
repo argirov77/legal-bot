@@ -10,9 +10,16 @@ from typing import List, Sequence
 
 LOGGER_NAME = "app.embeddings"
 DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-FALLBACK_DIMENSION = 64
+FALLBACK_DIMENSION = 384
 
 LOGGER = logging.getLogger(LOGGER_NAME)
+
+
+def _install_heavy_enabled() -> bool:
+    """Return whether heavy dependencies should be initialised."""
+
+    flag = os.getenv("INSTALL_HEAVY", "true").strip().lower()
+    return flag not in {"0", "false", "no", "off"}
 
 
 class EmbeddingModel:
@@ -30,6 +37,12 @@ class EmbeddingModel:
         self._model = None
         self._dimension = FALLBACK_DIMENSION
         self._embedder = self._fallback_embed_texts
+
+        if not _install_heavy_enabled():
+            LOGGER.info(
+                "INSTALL_HEAVY is disabled; using deterministic fallback embeddings."
+            )
+            return
 
         try:
             from sentence_transformers import SentenceTransformer  # type: ignore import-not-found
@@ -92,3 +105,9 @@ def get_embedding_model() -> EmbeddingModel:
     """Return a cached embedding model instance."""
 
     return EmbeddingModel()
+
+
+def reset_embedding_model_cache() -> None:
+    """Clear the cached embedding model instance (primarily for testing)."""
+
+    get_embedding_model.cache_clear()  # type: ignore[attr-defined]

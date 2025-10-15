@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Sequence, TYPE_CHECKING
 
 from app.ingest.models import DocumentChunk
 
+from .errors import VectorStoreUnavailableError
 from .mock_store import InMemoryChunkVectorStore, MockQueryResult, MockVectorStore
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checking only
@@ -70,10 +71,18 @@ class ChunkVectorStore:
         if self._store is None:  # pragma: no cover - defensive
             raise RuntimeError("A vector store backend must be provided")
 
-        self._store.create_collection(  # type: ignore[call-arg]
-            self.collection_name,
-            metadata={"hnsw:space": self.distance_metric},
-        )
+        try:
+            self._store.create_collection(  # type: ignore[call-arg]
+                self.collection_name,
+                metadata={"hnsw:space": self.distance_metric},
+            )
+        except VectorStoreUnavailableError:
+            raise
+        except Exception as exc:  # pragma: no cover - unexpected backend failure
+            raise VectorStoreUnavailableError(
+                "Failed to initialise vector store collection",
+                cause=exc,
+            ) from exc
 
     def _generate_chunk_id(self, chunk: DocumentChunk) -> str:
         meta = chunk.metadata
@@ -97,13 +106,18 @@ class ChunkVectorStore:
             metadatas.append(metadata)
 
         embeddings = self.embedding_model.embed_texts(documents)
-        self._store.add(  # type: ignore[attr-defined]
-            self.collection_name,
-            ids=ids,
-            embeddings=embeddings,
-            documents=documents,
-            metadatas=metadatas,
-        )
+        try:
+            self._store.add(  # type: ignore[attr-defined]
+                self.collection_name,
+                ids=ids,
+                embeddings=embeddings,
+                documents=documents,
+                metadatas=metadatas,
+            )
+        except VectorStoreUnavailableError:
+            raise
+        except Exception as exc:  # pragma: no cover - unexpected backend failure
+            raise VectorStoreUnavailableError("Failed to upsert chunks into vector store", cause=exc) from exc
         return ids
 
     def query_by_text(self, text: str, k: int = 5) -> List[ChunkSearchResult]:
@@ -114,9 +128,14 @@ class ChunkVectorStore:
         if not query_embeddings:
             return []
 
-        neighbours = self._store.query(  # type: ignore[attr-defined]
-            self.collection_name, query_embedding=query_embeddings[0], k=k
-        )
+        try:
+            neighbours = self._store.query(  # type: ignore[attr-defined]
+                self.collection_name, query_embedding=query_embeddings[0], k=k
+            )
+        except VectorStoreUnavailableError:
+            raise
+        except Exception as exc:  # pragma: no cover - unexpected backend failure
+            raise VectorStoreUnavailableError("Vector store query failed", cause=exc) from exc
 
         results: List[ChunkSearchResult] = []
         for neighbour in neighbours:
@@ -221,19 +240,28 @@ def get_vector_store() -> ChunkVectorStore | _MockVectorStoreAdapter:
             from chromadb.config import Settings
             import chromadb
         except ImportError as exc:  # pragma: no cover - depends on optional dependency
-            raise RuntimeError(
-                "VECTOR_STORE=chroma requires the 'chromadb' package to be installed"
+            raise VectorStoreUnavailableError(
+                "VECTOR_STORE=chroma requires the 'chromadb' package to be installed",
+                cause=exc,
             ) from exc
 
         settings = Settings(
             chroma_db_impl=os.getenv("CHROMA_DB_IMPL", "duckdb+parquet"),
             persist_directory=persist_dir,
         )
-        client = chromadb.Client(settings)
+        try:
+            client = chromadb.Client(settings)
+        except Exception as exc:  # pragma: no cover - depends on chromadb runtime
+            raise VectorStoreUnavailableError("Failed to initialise Chroma client", cause=exc) from exc
 
         from .chroma_store import ChromaStore
 
-        store = ChromaStore(persist_dir, client=client)
+        try:
+            store = ChromaStore(persist_dir, client=client)
+        except VectorStoreUnavailableError:
+            raise
+        except Exception as exc:  # pragma: no cover - unexpected backend failure
+            raise VectorStoreUnavailableError("Failed to initialise Chroma store", cause=exc) from exc
         return ChunkVectorStore(persist_dir=persist_dir, chroma_store=store)
 
     raise ValueError(f"Unsupported VECTOR_STORE backend: {backend!r}")
@@ -253,4 +281,5 @@ __all__ = [
     "InMemoryChunkVectorStore",
     "MockVectorStore",
     "MockQueryResult",
+    "VectorStoreUnavailableError",
 ]
