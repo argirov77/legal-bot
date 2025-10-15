@@ -1,7 +1,8 @@
-"""Lightweight in-memory vector store implementations."""
+"""Vector store helpers backed by a persistent Chroma database."""
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -12,7 +13,12 @@ from typing import Dict, List, Optional, Sequence
 from app.embeddings import EmbeddingModel, get_embedding_model
 from app.ingest.models import DocumentChunk
 
+from .chroma_store import ChromaStore
 from .mock_store import MockQueryResult, MockVectorStore
+
+
+DEFAULT_COLLECTION_NAME = "legal_chunks"
+DEFAULT_DISTANCE_METRIC = "cosine"
 
 
 @dataclass(slots=True)
@@ -26,23 +32,30 @@ class ChunkSearchResult:
 
 
 class ChunkVectorStore:
-    """Simple in-memory vector store backed by deterministic embeddings."""
+    """Persist document chunks in a Chroma vector store."""
 
     def __init__(
         self,
         *,
         persist_dir: str | Path | None = None,
-        collection_name: str = "legal_chunks",
+        collection_name: str = DEFAULT_COLLECTION_NAME,
         distance_metric: str | None = None,
         embedding_model: Optional[EmbeddingModel] = None,
+        chroma_store: Optional[ChromaStore] = None,
     ) -> None:
-        self.persist_dir = Path(persist_dir or Path("vectorstore")).resolve()
+        base_dir = persist_dir or os.getenv("CHROMA_PERSIST_DIR", "chroma_db")
+        self.persist_dir = Path(base_dir).resolve()
         self.persist_dir.mkdir(parents=True, exist_ok=True)
         self.collection_name = collection_name
-        self.distance_metric = distance_metric or "euclidean"
+        self.distance_metric = distance_metric or os.getenv(
+            "CHROMA_DISTANCE_METRIC", DEFAULT_DISTANCE_METRIC
+        )
         self.embedding_model = embedding_model or get_embedding_model()
-        self._documents: Dict[str, DocumentChunk] = {}
-        self._embeddings: Dict[str, List[float]] = {}
+        self._store = chroma_store or ChromaStore(self.persist_dir)
+        self._store.create_collection(
+            self.collection_name,
+            metadata={"hnsw:space": self.distance_metric},
+        )
 
     def _generate_chunk_id(self, chunk: DocumentChunk) -> str:
         meta = chunk.metadata
@@ -54,59 +67,81 @@ class ChunkVectorStore:
             return []
 
         ids: List[str] = []
-        documents = list(chunks)
-        embeddings = self.embedding_model.embed_texts([chunk.content for chunk in documents])
-        for chunk, embedding in zip(documents, embeddings):
+        documents: List[str] = []
+        metadatas: List[Dict[str, object]] = []
+
+        for chunk in chunks:
             chunk_id = self._generate_chunk_id(chunk)
             ids.append(chunk_id)
-            self._documents[chunk_id] = chunk
-            self._embeddings[chunk_id] = list(embedding)
-        self._persist()
-        return ids
+            documents.append(chunk.content)
+            metadata = asdict(chunk.metadata)
+            metadata["content_length"] = len(chunk.content)
+            metadatas.append(metadata)
 
-    def _persist(self) -> None:
-        state = {
-            "collection": self.collection_name,
-            "chunks": [
-                {
-                    "id": chunk_id,
-                    "content": chunk.content,
-                    "metadata": asdict(chunk.metadata),
-                    "embedding": self._embeddings.get(chunk_id, []),
-                }
-                for chunk_id, chunk in self._documents.items()
-            ],
-        }
-        snapshot_file = self.persist_dir / f"{self.collection_name}.json"
-        snapshot_file.write_text(json.dumps(state, indent=2))
+        embeddings = self.embedding_model.embed_texts(documents)
+        self._store.add(
+            self.collection_name,
+            ids=ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas,
+        )
+        return ids
 
     def query_by_text(self, text: str, k: int = 5) -> List[ChunkSearchResult]:
         if not text.strip() or k <= 0:
             return []
-        if not self._documents:
+
+        query_embeddings = self.embedding_model.embed_texts([text])
+        if not query_embeddings:
             return []
 
-        scored: List[ChunkSearchResult] = []
-        for chunk_id, chunk in self._documents.items():
-            distance = 1.0 / (1.0 + len(chunk.content))
-            scored.append(
+        neighbours = self._store.query(
+            self.collection_name, query_embedding=query_embeddings[0], k=k
+        )
+
+        results: List[ChunkSearchResult] = []
+        for neighbour in neighbours:
+            metadata = dict(neighbour.get("metadata", {}))
+            results.append(
                 ChunkSearchResult(
-                    id=chunk_id,
-                    content=chunk.content,
-                    distance=distance,
-                    metadata={**asdict(chunk.metadata), "content_length": len(chunk.content)},
+                    id=str(neighbour.get("id", "")),
+                    content=str(neighbour.get("document", "")),
+                    distance=float(neighbour.get("distance", 0.0)),
+                    metadata=metadata,
                 )
             )
-
-        scored.sort(key=lambda item: item.distance)
-        return scored[: min(k, len(scored))]
+        return results
 
     def create_snapshot(self, snapshot_dir: Path | None = None) -> Path:
         snapshot_dir = snapshot_dir or self.persist_dir / "snapshots"
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d%H%M%S")
         snapshot_path = snapshot_dir / f"{self.collection_name}-{timestamp}.json"
-        snapshot_path.write_text((self.persist_dir / f"{self.collection_name}.json").read_text())
+
+        collection = self._store.get_collection(self.collection_name)
+        records = collection.get(include=["ids", "documents", "metadatas", "embeddings"])
+
+        ids = records.get("ids", []) or []
+        documents = records.get("documents", []) or []
+        metadatas = records.get("metadatas", []) or []
+        embeddings = records.get("embeddings", []) or []
+
+        snapshot_payload = [
+            {
+                "id": item_id,
+                "content": document,
+                "metadata": metadata or {},
+                "embedding": embedding or [],
+            }
+            for item_id, document, metadata, embedding in zip(
+                ids, documents, metadatas, embeddings
+            )
+        ]
+
+        snapshot_path.write_text(
+            json.dumps(snapshot_payload, indent=2, ensure_ascii=False)
+        )
         return snapshot_path
 
 
@@ -128,6 +163,7 @@ __all__ = [
     "ChunkSearchResult",
     "get_vector_store",
     "reset_vector_store_cache",
+    "ChromaStore",
     "MockVectorStore",
     "MockQueryResult",
 ]

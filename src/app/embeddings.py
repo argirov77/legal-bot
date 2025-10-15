@@ -1,39 +1,48 @@
-"""Lightweight embedding helpers used by the in-memory test setup."""
+"""Embedding helpers backed by Sentence Transformers."""
 from __future__ import annotations
 
-import hashlib
+import os
 from functools import lru_cache
 from typing import List, Sequence
 
+from sentence_transformers import SentenceTransformer
+
 LOGGER_NAME = "app.embeddings"
+DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 class EmbeddingModel:
-    """Deterministic embedding model that does not require external downloads."""
+    """Wrapper around a SentenceTransformer embedding model."""
 
-    def __init__(self, dimension: int = 8, *_: object, **__: object) -> None:
-        if dimension <= 0:
-            raise ValueError("dimension must be a positive integer")
-        self._dimension = dimension
+    def __init__(
+        self,
+        model_name_or_path: str | None = None,
+        *,
+        device: str | None = None,
+    ) -> None:
+        model_path = model_name_or_path or os.getenv("EMBEDDING_MODEL_PATH", DEFAULT_MODEL_NAME)
+        embedding_device = device or os.getenv("EMBEDDING_DEVICE")
+        self._model = SentenceTransformer(model_path, device=embedding_device)
 
     def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:
-        embeddings: List[List[float]] = []
-        for text in texts:
-            if not isinstance(text, str):
-                text = str(text)
-            digest = hashlib.sha256(text.encode("utf-8")).digest()
-            vector: List[float] = []
-            for index in range(self._dimension):
-                start = (index * 4) % len(digest)
-                chunk = digest[start : start + 4]
-                value = int.from_bytes(chunk, "big") / 0xFFFFFFFF
-                vector.append(value * 2.0 - 1.0)
-            embeddings.append(vector)
-        return embeddings
+        if not texts:
+            return []
+        embeddings = self._model.encode(
+            list(texts),
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            normalize_embeddings=False,
+        )
+        return embeddings.tolist()
+
+    def encode(self, texts: Sequence[str]) -> List[List[float]]:
+        """Compatibility method mirroring the sentence-transformers API."""
+
+        return self.embed_texts(texts)
 
     @property
     def dimension(self) -> int:
-        return self._dimension
+        return int(self._model.get_sentence_embedding_dimension())
 
 
 @lru_cache()
