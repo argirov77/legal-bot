@@ -33,13 +33,24 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install -r requirements.txt
 
-RUN --mount=type=cache,target=/root/.cache/pip <<'PY'
+RUN --mount=type=cache,target=/root/.cache/pip python - <<'PY'
 import os
 import subprocess
-install_heavy = os.environ.get("INSTALL_HEAVY", "false").lower() in {"1", "true", "yes", "on"}
-if install_heavy:
+
+
+def should_install_heavy() -> bool:
+    value = os.environ.get("INSTALL_HEAVY", "false").lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+if should_install_heavy():
     subprocess.check_call([
-        "python", "-m", "pip", "install", "-r", "requirements.heavy.txt"
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        "requirements.heavy.txt",
     ])
 PY
 
