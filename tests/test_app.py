@@ -7,6 +7,7 @@ from app.vectorstore import (
     VectorStoreUnavailableError,
     get_vector_store,
 )
+from app.llm_provider import LLM
 
 
 def test_read_root_returns_ok() -> None:
@@ -104,6 +105,41 @@ def test_readyz_returns_error_when_vector_store_unavailable(monkeypatch) -> None
 
     assert response.status_code == 503
     assert "vector_store_unavailable" in response.json()["detail"]
+
+
+def test_model_status_endpoint_reports_model_state(monkeypatch) -> None:
+    class DummyLLM(LLM):
+        def __init__(self) -> None:
+            self._loaded = True
+
+        def generate(self, prompt: str, max_tokens: int, temperature: float) -> str:
+            return ""
+
+        @property
+        def model_loaded(self) -> bool:
+            return self._loaded
+
+        @property
+        def model_name(self) -> str:
+            return "dummy-model"
+
+        @property
+        def device(self) -> str:
+            return "cpu"
+
+    dummy_llm = DummyLLM()
+    monkeypatch.setattr("app.main.get_llm", lambda: dummy_llm)
+
+    client = TestClient(app)
+    response = client.get("/model_status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {
+        "model_loaded": True,
+        "model_name": "dummy-model",
+        "device": "cpu",
+    }
 
 
 def test_query_endpoint_returns_results() -> None:
