@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
 
-import chromadb
-from chromadb.api import ClientAPI
-from chromadb.api.models.Collection import Collection
+try:  # pragma: no cover - optional dependency
+    import chromadb  # type: ignore
+except Exception:  # pragma: no cover - gracefully degrade when unavailable
+    chromadb = None  # type: ignore
+
+if TYPE_CHECKING:  # pragma: no cover - import for typing only
+    from chromadb.api import ClientAPI
+    from chromadb.api.models.Collection import Collection
+else:  # pragma: no cover - runtime fallback types
+    ClientAPI = Any  # type: ignore
+    Collection = Any  # type: ignore
 
 try:  # pragma: no cover - depends on chromadb internals
     from chromadb.errors import NotEnoughElementsException
@@ -31,8 +39,16 @@ class ChromaStore:
     ) -> None:
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
+        if chromadb is None and client is None:
+            raise VectorStoreUnavailableError(
+                "chromadb is not installed; cannot initialise persistent vector store"
+            )
+
         try:
-            self._client: ClientAPI = client or chromadb.PersistentClient(path=str(self.persist_dir))
+            if client is not None:
+                self._client = client
+            else:
+                self._client = chromadb.PersistentClient(path=str(self.persist_dir))  # type: ignore[union-attr]
         except Exception as exc:  # pragma: no cover - depends on chromadb runtime
             raise VectorStoreUnavailableError(
                 "Failed to initialise Chroma persistent client",

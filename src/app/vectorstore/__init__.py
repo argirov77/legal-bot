@@ -14,7 +14,12 @@ from typing import Dict, List, Optional, Sequence, TYPE_CHECKING
 from app.ingest.models import DocumentChunk
 
 from .errors import VectorStoreUnavailableError
-from .mock_store import InMemoryChunkVectorStore, MockQueryResult, MockVectorStore
+from .mock_store import (
+    InMemoryChunkVectorStore,
+    MockQueryResult,
+    MockVectorStore,
+    PersistentMockVectorStore,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checking only
     from app.embeddings import EmbeddingModel
@@ -102,6 +107,7 @@ class ChunkVectorStore:
             ids.append(chunk_id)
             documents.append(chunk.content)
             metadata = asdict(chunk.metadata)
+            metadata["session_id"] = getattr(chunk.metadata, "session_id", None)
             metadata["content_length"] = len(chunk.content)
             metadatas.append(metadata)
 
@@ -231,7 +237,11 @@ def get_vector_store() -> ChunkVectorStore | _MockVectorStoreAdapter:
     backend = os.getenv("VECTOR_STORE", "mock").strip().lower()
 
     if backend == "mock":
-        return _MockVectorStoreAdapter(InMemoryChunkVectorStore())
+        persist_dir = Path(os.environ.get("CHROMA_PERSIST_DIR", "/chroma_db")).resolve()
+        vector_store = PersistentMockVectorStore(persist_dir)
+        return _MockVectorStoreAdapter(
+            InMemoryChunkVectorStore(vector_store=vector_store)
+        )
 
     if backend == "chroma":
         persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "chroma_db")

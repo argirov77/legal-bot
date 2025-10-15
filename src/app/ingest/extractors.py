@@ -8,8 +8,15 @@ import tempfile
 from dataclasses import dataclass
 from typing import Iterable, List
 
-from PyPDF2 import PdfReader
-from docx import Document as DocxDocument
+from typing import TYPE_CHECKING
+
+try:  # pragma: no cover - optional heavy dependency
+    from PyPDF2 import PdfReader  # type: ignore
+except Exception:  # pragma: no cover - gracefully handle missing dependency
+    PdfReader = None  # type: ignore
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checking only
+    from docx import Document as DocxDocument
 
 from .models import PageContent
 
@@ -47,11 +54,22 @@ class PDFExtractor:
         return PDFExtractionResult(pages=self._extract_text(ocr_data), ocr_performed=True)
 
     def _extract_text(self, data: bytes) -> List[PageContent]:
+        if PdfReader is None:
+            LOGGER.warning(
+                "PyPDF2 is not installed; falling back to naive UTF-8 decoding for PDF extraction"
+            )
+            fallback_text = data.decode("utf-8", errors="ignore")
+            return [PageContent(page_number=1, text=fallback_text, char_offset=0)]
+
         reader = PdfReader(io.BytesIO(data))
         pages: List[PageContent] = []
         char_offset = 0
         for index, page in enumerate(reader.pages, start=1):
-            text = page.extract_text() or ""
+            try:
+                text = page.extract_text() or ""
+            except Exception as error:  # pragma: no cover - depends on pdfminer backend
+                LOGGER.warning("Failed to extract text from PDF page %s: %s", index, error)
+                text = ""
             pages.append(PageContent(page_number=index, text=text, char_offset=char_offset))
             char_offset += len(text)
         return pages
@@ -88,12 +106,56 @@ class DocxExtractor:
     """Extract text from Microsoft Word documents."""
 
     def extract(self, data: bytes) -> Iterable[PageContent]:
-        document = DocxDocument(io.BytesIO(data))
-        text_parts = []
-        for paragraph in document.paragraphs:
-            if paragraph.text:
-                text_parts.append(paragraph.text)
-        text = "\n\n".join(text_parts)
+        document = self._load_document(data)
+        if document is not None:
+            text_parts = []
+            for paragraph in document.paragraphs:
+                if paragraph.text:
+                    text_parts.append(paragraph.text)
+            text = "\n\n".join(text_parts)
+            return [PageContent(page_number=1, text=text, char_offset=0)]
+
+        return self._fallback_extract(data)
+
+    def _load_document(self, data: bytes):  # pragma: no cover - thin wrapper
+        try:
+            from docx import Document as DocxDocument  # type: ignore
+        except Exception as error:
+            LOGGER.warning(
+                "python-docx is unavailable; falling back to lightweight DOCX extraction (%s)",
+                error,
+            )
+            return None
+
+        try:
+            return DocxDocument(io.BytesIO(data))
+        except Exception as error:
+            LOGGER.warning("python-docx failed to parse DOCX content: %s", error)
+            return None
+
+    def _fallback_extract(self, data: bytes) -> Iterable[PageContent]:
+        try:
+            import xml.etree.ElementTree as ET
+            import zipfile
+
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                xml_bytes = archive.read("word/document.xml")
+        except Exception as error:
+            LOGGER.warning(
+                "DOCX fallback extraction failed to read XML payload: %s", error
+            )
+            text = data.decode("utf-8", errors="ignore")
+            return [PageContent(page_number=1, text=text, char_offset=0)]
+
+        try:
+            root = ET.fromstring(xml_bytes)
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            text_parts = [node.text for node in root.iter(f"{namespace}t") if node.text]
+            text = "\n\n".join(text_parts)
+        except Exception as error:
+            LOGGER.warning("DOCX fallback XML parsing failed: %s", error)
+            text = xml_bytes.decode("utf-8", errors="ignore")
+
         return [PageContent(page_number=1, text=text, char_offset=0)]
 
 
