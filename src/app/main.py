@@ -14,6 +14,7 @@ from app.vectorstore import (
     VectorStoreUnavailableError,
     get_vector_store,
 )
+from app.llm_provider import get_llm
 
 # TODO: Wire LLMProvider dependency to expose BgGPT/Gemma completion endpoints.
 
@@ -96,6 +97,18 @@ def readiness_probe() -> str:
         raise HTTPException(status_code=503, detail="; ".join(errors))
 
     return "ok"
+
+
+@app.get("/model_status")
+def model_status() -> dict[str, object]:
+    """Expose lazy model loading status and device placement."""
+
+    llm = get_llm()
+    return {
+        "model_loaded": llm.model_loaded,
+        "model_name": llm.model_name,
+        "device": llm.device,
+    }
 
 
 class QueryRequest(BaseModel):

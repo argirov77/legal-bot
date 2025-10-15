@@ -145,7 +145,9 @@ models/
 ```
 
 Убедитесь, что имена директорий соответствуют путям в переменных окружения
-`EMBEDDING_MODEL_PATH`, `LLM_BG1_PATH` и `LLM_BG2_PATH`.
+`EMBEDDING_MODEL_PATH` и `LLM_MODEL_PATH`. Чтобы переключиться на альтернативную
+болгарскую модель (например, Gemma 2 BG), измените значение `LLM_MODEL_PATH`
+на `/models/gemma-2-bg` и перезапустите сервис.
 
 ## Наполнение (prefill) Chroma
 
@@ -189,10 +191,14 @@ models/
 | `EMBEDDING_MODEL_PATH`  | Путь к модели эмбеддингов в папке `models/`                                 |
 | `EMBEDDING_DEVICE`      | Устройство для инференса эмбеддингов (`cpu`, `cuda`, `cuda:0` и т.п.)       |
 | `LLM_PROVIDER`          | Провайдер LLM (`transformers`, `mock`)                                     |
-| `LLM_BG1_PATH`          | Основная LLM модель                                                         |
-| `LLM_BG2_PATH`          | Альтернативная LLM модель                                                   |
+| `LLM_MODEL_PATH`        | Путь к каталогу локальной LLM модели                                       |
+| `LLM_DEVICE_MAP`        | Стратегия распределения слоёв модели (`single`, `auto`, `sequential`)       |
+| `LLM_TORCH_DTYPE`       | Тип тензоров для загрузки модели (`float16`, `bfloat16`, `float32`)         |
+| `LLM_MAX_TOKENS`        | Количество новых токенов, генерируемых по умолчанию                        |
+| `LLM_TEMPERATURE`       | Базовая температура сэмплирования ответа                                  |
+| `LLM_STUB`              | Принудительное использование заглушки вместо настоящей модели              |
 | `OCR_LANG`              | Язык для OCR в пайплайне (например, `bul`)                                 |
-| `INSTALL_HEAVY`         | Включение тяжёлых зависимостей при сборке контейнера                       |
+| `INSTALL_HEAVY`         | Включение тяжёлых зависимостей (torch/transformers/ocr и т.д.) при сборке  |
 
 Дополнительные переменные можно посмотреть в `.env.example`.
 

@@ -2,6 +2,8 @@ chromadb==0.4.24
 sentence-transformers==2.2.2
 torch==2.2.2
 transformers==4.38.2
+accelerate==0.27.2
+# bitsandbytes==0.42.0  # uncomment when GPU with CUDA support is available
 PyPDF2==3.0.1
 python-docx==0.8.11
 pdfminer.six==20231228
