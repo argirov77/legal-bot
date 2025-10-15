@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
+ENV PYTHONPATH=/app/src
 
 ARG INSTALL_HEAVY=false
 
@@ -45,7 +46,7 @@ RUN if [ "$INSTALL_HEAVY" = "true" ]; then \
 
 # copy sources
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
-COPY src/. .
+COPY src/ /app/src/
 
 # create volumes dirs (optional)
 RUN mkdir -p /models /chroma_db /data
