@@ -1,7 +1,7 @@
 services:
   app:
     extends:
-      file: docker-compose.yml
+      file: docker-compose.dev.yml
       service: app
     device_requests:
       - driver: nvidia

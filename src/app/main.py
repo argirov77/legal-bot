@@ -8,7 +8,12 @@ from pydantic import BaseModel, Field
 from app.api.rag import router as rag_router
 from app.logging_config import configure_logging
 from app.embeddings import get_embedding_model
-from app.vectorstore import ChunkSearchResult, ChunkVectorStore, get_vector_store
+from app.vectorstore import (
+    ChunkSearchResult,
+    ChunkVectorStore,
+    VectorStoreUnavailableError,
+    get_vector_store,
+)
 
 # TODO: Wire LLMProvider dependency to expose BgGPT/Gemma completion endpoints.
 
@@ -31,6 +36,13 @@ def _resolve_dependency(factory: Callable[[], T]) -> T:
 
 def _is_mock_vector_store() -> bool:
     return os.getenv("VECTOR_STORE", "mock").strip().lower() == "mock"
+
+
+def _get_vector_store_or_503() -> ChunkVectorStore:
+    try:
+        return get_vector_store()
+    except VectorStoreUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/", response_class=PlainTextResponse)
@@ -62,9 +74,19 @@ def readiness_probe() -> str:
         errors.append(f"embedding_model_unavailable: {exc}")
 
     try:
-        store = _resolve_dependency(get_vector_store)
+        try:
+            store = _resolve_dependency(get_vector_store)
+        except VectorStoreUnavailableError as exc:
+            errors.append(f"vector_store_unavailable: {exc}")
+            store = None
+
+        if store is None:
+            raise HTTPException(status_code=503, detail="; ".join(errors))
         if hasattr(store, "query_by_text"):
-            store.query_by_text("__readyz__", k=1)
+            try:
+                store.query_by_text("__readyz__", k=1)
+            except VectorStoreUnavailableError as exc:
+                errors.append(f"vector_store_unavailable: {exc}")
         else:
             raise AttributeError("vector store is missing 'query_by_text'")
     except Exception as exc:  # pragma: no cover - defensive guard
@@ -104,9 +126,12 @@ def _serialize_result(result: ChunkSearchResult) -> QueryResponseItem:
 @app.post("/query", response_model=QueryResponse)
 def query_vector_store(
     request: QueryRequest,
-    store: ChunkVectorStore = Depends(get_vector_store),
+    store: ChunkVectorStore = Depends(_get_vector_store_or_503),
 ) -> QueryResponse:
     """Query the vector store by plain text and return similar chunks."""
 
-    results = store.query_by_text(request.text, k=request.k)
+    try:
+        results = store.query_by_text(request.text, k=request.k)
+    except VectorStoreUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return QueryResponse(results=[_serialize_result(item) for item in results])
