@@ -17,12 +17,31 @@ def test_read_root_returns_ok() -> None:
     assert response.text == "ok"
 
 
-def test_healthz_returns_ok() -> None:
+def test_healthz_returns_ok(monkeypatch) -> None:
+    status = LLMStatus(model_loaded=True, model_name="dummy-model", device="cpu")
+    monkeypatch.setattr("app.main.get_llm_status", lambda: status)
+
     client = TestClient(app)
     response = client.get("/healthz")
 
     assert response.status_code == 200
     assert response.text == "ok"
+
+
+def test_healthz_returns_503_when_model_unavailable(monkeypatch) -> None:
+    status = LLMStatus(
+        model_loaded=False,
+        model_name="stub",
+        device="cpu",
+        error="Model not available",
+    )
+    monkeypatch.setattr("app.main.get_llm_status", lambda: status)
+
+    client = TestClient(app)
+    response = client.get("/healthz")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Model not available"
 
 
 def test_readyz_returns_ok_with_mock_backend(monkeypatch) -> None:
