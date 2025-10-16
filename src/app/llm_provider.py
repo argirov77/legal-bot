@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 
 try:  # pragma: no cover - optional heavy dependencies
@@ -29,6 +29,16 @@ SYSTEM_PROMPT_BG = (
 )
 
 DEFAULT_STUB_RESPONSE = "Моделът в момента не е наличен. Моля, опитайте отново по-късно."
+
+
+@dataclass(slots=True)
+class LLMStatus:
+    """Structured status information about the configured LLM backend."""
+
+    model_loaded: bool
+    model_name: str
+    device: str
+    error: Optional[str] = None
 
 
 class LLMError(RuntimeError):
@@ -69,15 +79,49 @@ class LLM:
 
         return "cpu"
 
+    @property
+    def last_error(self) -> Optional[str]:
+        """Return the most recent loading error, if any."""
+
+        return None
+
+    def preload(self) -> None:
+        """Eagerly load the model weights when supported."""
+
+        return None
+
+    def status(self) -> LLMStatus:
+        """Return structured diagnostic information for health checks."""
+
+        return LLMStatus(
+            model_loaded=self.model_loaded,
+            model_name=self.model_name,
+            device=self.device,
+            error=self.last_error,
+        )
+
 
 class LLMStub(LLM):
     """Fallback implementation returning a friendly Bulgarian message."""
 
-    def __init__(self, message: str = DEFAULT_STUB_RESPONSE) -> None:
+    def __init__(
+        self,
+        message: str = DEFAULT_STUB_RESPONSE,
+        *,
+        reason: str | None = None,
+    ) -> None:
         self._message = message
+        self._reason = reason or "LLM stub is active (model not configured)."
 
     def generate(self, prompt: str, max_tokens: int, temperature: float) -> str:
         return self._message
+
+    @property
+    def last_error(self) -> Optional[str]:
+        return self._reason
+
+    def update_reason(self, reason: str) -> None:
+        self._reason = reason
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -137,11 +181,28 @@ def _resolve_device_map(strategy: str) -> tuple[object, str]:
     return _single_device_map()
 
 
+def _resolve_device_strategy() -> str:
+    explicit_device = os.getenv("LLM_DEVICE")
+    if explicit_device:
+        normalised = explicit_device.strip().lower()
+        if normalised in {"cpu", "cpu:0"}:
+            return "single"
+        if normalised in {"cuda", "cuda:0", "gpu"}:
+            return "single"
+        if normalised == "auto":
+            return "auto"
+    map_from_env = os.getenv("LLM_DEVICE_MAP")
+    if map_from_env:
+        return map_from_env
+    return "single"
+
+
 @dataclass(slots=True)
 class _LLMConfig:
     model_path: str
     device_strategy: str
     torch_dtype: Optional["torch.dtype"]
+    quantization: Optional[str]
 
 
 class TransformersLLM(LLM):
@@ -171,6 +232,12 @@ class TransformersLLM(LLM):
     def device(self) -> str:
         return self._device_label
 
+    @property
+    def last_error(self) -> Optional[str]:
+        if self._load_error is None:
+            return None
+        return str(self._load_error)
+
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
@@ -179,12 +246,22 @@ class TransformersLLM(LLM):
                 return
 
             if AutoModelForCausalLM is None or AutoTokenizer is None or torch is None:
+                base_error = _IMPORT_ERROR or RuntimeError(
+                    "PyTorch/Transformers are not available in the current environment"
+                )
+                self._load_error = base_error
                 raise LLMNotReadyError(
                     "PyTorch/Transformers are not available in the current environment"
-                ) from _IMPORT_ERROR
+                ) from base_error
 
             LOGGER.info("loading model... (source=%s)", self._config.model_path)
             device_map, device_label = _resolve_device_map(self._config.device_strategy)
+
+            if self._config.quantization:
+                LOGGER.warning(
+                    "Quantization '%s' requested but not currently configured; proceeding without it.",
+                    self._config.quantization,
+                )
 
             try:
                 model = AutoModelForCausalLM.from_pretrained(
@@ -244,6 +321,7 @@ class TransformersLLM(LLM):
             self._model = model
             self._tokenizer = tokenizer
             LOGGER.info("model loaded on %s", self._device_label)
+            self._load_error = None
 
     def _build_prompt(self, user_prompt: str) -> str:
         user_content = user_prompt.strip()
@@ -297,6 +375,9 @@ class TransformersLLM(LLM):
 
         return text.strip()
 
+    def preload(self) -> None:
+        self._ensure_loaded()
+
 
 _GLOBAL_LLM: Optional[LLM] = None
 _GLOBAL_STUB = LLMStub()
@@ -306,12 +387,14 @@ def _build_config() -> Optional[_LLMConfig]:
     model_path = os.getenv("LLM_MODEL_PATH")
     if not model_path:
         return None
-    device_strategy = os.getenv("LLM_DEVICE_MAP", "single")
+    device_strategy = _resolve_device_strategy()
     torch_dtype = _resolve_dtype(os.getenv("LLM_TORCH_DTYPE", "float16"))
+    quantization = os.getenv("LLM_QUANT")
     return _LLMConfig(
         model_path=model_path,
         device_strategy=device_strategy,
         torch_dtype=torch_dtype,
+        quantization=quantization,
     )
 
 
@@ -325,6 +408,7 @@ def get_llm() -> LLM:
 
     if _env_flag("LLM_STUB"):
         LOGGER.warning("LLM_STUB flag enabled; using stub responses only.")
+        _GLOBAL_STUB.update_reason("LLM_STUB flag enabled; model loading disabled.")
         _GLOBAL_LLM = _GLOBAL_STUB
         return _GLOBAL_LLM
 
@@ -333,6 +417,7 @@ def get_llm() -> LLM:
         LOGGER.warning(
             "LLM_MODEL_PATH is not configured; falling back to stub responses."
         )
+        _GLOBAL_STUB.update_reason("LLM_MODEL_PATH is not configured.")
         _GLOBAL_LLM = _GLOBAL_STUB
         return _GLOBAL_LLM
 
@@ -340,14 +425,61 @@ def get_llm() -> LLM:
     return _GLOBAL_LLM
 
 
+def _should_attempt_startup_load() -> bool:
+    return _env_flag("INSTALL_HEAVY") or _env_flag("FORCE_LOAD_ON_START")
+
+
+def load_llm_on_startup() -> Tuple[bool, Optional[Exception]]:
+    """Attempt to load the configured LLM eagerly when requested.
+
+    Returns a tuple ``(attempted, error)`` describing whether an attempt was made and
+    the exception that occurred (if any).
+    """
+
+    if not _should_attempt_startup_load():
+        return False, None
+
+    model_path = os.getenv("LLM_MODEL_PATH")
+    if not model_path:
+        LOGGER.info(
+            "Startup model loading requested but LLM_MODEL_PATH is not configured; skipping."
+        )
+        return False, None
+
+    llm = get_llm()
+    if isinstance(llm, LLMStub):
+        LOGGER.info("Startup model loading requested but LLM stub backend is active; skipping.")
+        return False, None
+
+    LOGGER.info("attempting to load model %s", llm.model_name)
+    try:
+        llm.preload()
+    except Exception as error:  # pragma: no cover - depends on environment
+        LOGGER.exception("failed to load model %s", llm.model_name)
+        return True, error
+
+    LOGGER.info("model loaded")
+    return True, None
+
+
+def get_llm_status() -> LLMStatus:
+    """Return structured status information about the configured LLM."""
+
+    llm = get_llm()
+    return llm.status()
+
+
 __all__ = [
     "DEFAULT_STUB_RESPONSE",
     "LLM",
+    "LLMStatus",
     "LLMError",
     "LLMGenerationError",
     "LLMNotReadyError",
     "LLMStub",
     "SYSTEM_PROMPT_BG",
+    "get_llm_status",
     "get_llm",
+    "load_llm_on_startup",
 ]
 

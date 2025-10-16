@@ -3,9 +3,15 @@ services:
     extends:
       file: docker-compose.dev.yml
       service: app
+    build:
+      target: heavy
+      args:
+        INSTALL_HEAVY: "true"
     device_requests:
       - driver: nvidia
         count: all
         capabilities:
           - gpu
     runtime: nvidia
+    environment:
+      INSTALL_HEAVY: "true"
