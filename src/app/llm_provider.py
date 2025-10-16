@@ -162,6 +162,15 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _default_use_gpu() -> bool:
+    if torch is None:
+        return False
+    try:
+        return torch.cuda.is_available() and torch.cuda.device_count() > 0
+    except Exception:  # pragma: no cover - defensive guard
+        return False
+
+
 def _env_int(name: str) -> Optional[int]:
     value = os.getenv(name)
     if value is None:
@@ -717,7 +726,7 @@ def _build_config() -> Optional[_LLMConfig]:
     model_path = _resolve_model_path_from_env()
     if not model_path:
         return None
-    use_gpu = _env_flag("USE_GPU")
+    use_gpu = _env_flag("USE_GPU", default=_default_use_gpu())
     device_strategy = _resolve_device_strategy(use_gpu)
     torch_dtype = _resolve_dtype(os.getenv("LLM_TORCH_DTYPE", "float16"))
     quantization = os.getenv("LLM_QUANT")
