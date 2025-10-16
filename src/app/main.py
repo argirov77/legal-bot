@@ -7,7 +7,6 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.api.rag import router as rag_router
-from app.logging_config import configure_logging
 from app.embeddings import get_embedding_model
 from app.vectorstore import (
     ChunkSearchResult,
@@ -16,6 +15,14 @@ from app.vectorstore import (
     get_vector_store,
 )
 from app.llm_provider import get_llm, get_llm_status, load_llm_on_startup
+from app.logging_config import configure_logging
+from app.telemetry import (
+    emit_app_startup_event,
+    emit_container_context,
+    emit_env_versions,
+    emit_gpu_detection,
+    emit_resources_snapshot,
+)
 
 # TODO: Wire LLMProvider dependency to expose BgGPT/Gemma completion endpoints.
 
@@ -31,6 +38,11 @@ app.include_router(rag_router)
 async def _startup_model_loader() -> None:
     """Optionally preload the local LLM when requested via environment flags."""
 
+    emit_app_startup_event()
+    emit_container_context()
+    emit_gpu_detection()
+    emit_env_versions()
+    emit_resources_snapshot()
     load_llm_on_startup()
 
 

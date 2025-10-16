@@ -5,15 +5,30 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
+
+from app.telemetry import (
+    emit_cuda_error,
+    emit_exception,
+    emit_llm_provider_init,
+    emit_model_load_start,
+    emit_model_load_success,
+    emit_model_path_inspection,
+    emit_model_permissions,
+    emit_model_shard_map,
+    emit_numpy_compat_error,
+    emit_tokenizer_event,
+)
 
 
 try:  # pragma: no cover - optional heavy dependencies
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 except Exception as import_error:  # pragma: no cover - optional heavy deps
+    emit_numpy_compat_error("torch/transformers", import_error)
     AutoModelForCausalLM = None
     AutoTokenizer = None
     torch = None  # type: ignore[assignment]
@@ -31,6 +46,8 @@ MODEL_PATH_ENV_KEYS: tuple[str, str, str] = (
     "LLM_BG1_PATH",
     "LLM_BG2_PATH",
 )
+
+_INSPECTED_PATHS: set[str] = set()
 
 SYSTEM_PROMPT_BG = (
     "You are a legal assistant. Answer in Bulgarian, use only provided sources. "
@@ -138,6 +155,26 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str) -> Optional[int]:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _env_float(name: str) -> Optional[float]:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _resolve_dtype(value: str | None) -> Optional["torch.dtype"]:
@@ -310,12 +347,23 @@ class TransformersLLM(LLM):
 
             errors: list[tuple[str, Exception]] = []
             model = None
+            successful_map: object | None = None
+            load_started = time.perf_counter()
+            emit_model_shard_map(self._config.model_path)
             for current_map, current_label in candidates:
                 LOGGER.info(
                     "trying to load LLM from %s (device_map=%s, dtype=%s, low_cpu_mem_usage=True)",
                     self._config.model_path,
                     _format_device_map(current_map),
                     dtype_label,
+                )
+                emit_model_load_start(
+                    provider="transformers",
+                    model_path=self._config.model_path,
+                    device_map=_format_device_map(current_map),
+                    dtype=dtype_label,
+                    low_cpu_mem_usage=True,
+                    quantization=self._config.quantization,
                 )
                 try:
                     model = AutoModelForCausalLM.from_pretrained(
@@ -332,6 +380,10 @@ class TransformersLLM(LLM):
                         current_label,
                         error,
                     )
+                    if "CUDA out of memory" in str(error):
+                        emit_cuda_error(error, snapshot=None)
+                    else:
+                        emit_exception(module=__name__, error=error)
                     continue
 
                 self._device_label = current_label
@@ -340,6 +392,7 @@ class TransformersLLM(LLM):
                     if current_label.startswith("cuda") and torch.cuda.is_available()
                     else "cpu"
                 )
+                successful_map = current_map
                 break
 
             if model is None:
@@ -348,6 +401,7 @@ class TransformersLLM(LLM):
                 self._stub.update_reason(f"Failed to load model on {last_label}: {last_error}")
                 raise LLMNotReadyError("Failed to load the language model") from last_error
 
+            tokenizer_started = time.perf_counter()
             try:
                 tokenizer = AutoTokenizer.from_pretrained(self._config.model_path)
                 if (
@@ -356,15 +410,55 @@ class TransformersLLM(LLM):
                 ):  # pragma: no cover - configuration guard
                     tokenizer.pad_token_id = tokenizer.eos_token_id
             except Exception as error:  # pragma: no cover - depends on model files
+                emit_tokenizer_event(
+                    path=self._config.model_path,
+                    duration_ms=(time.perf_counter() - tokenizer_started) * 1000.0,
+                    error=error,
+                )
                 self._load_error = error
                 self._stub.update_reason(f"Failed to load tokenizer: {error}")
                 raise LLMNotReadyError("Failed to load tokenizer") from error
+
+            emit_tokenizer_event(
+                path=self._config.model_path,
+                duration_ms=(time.perf_counter() - tokenizer_started) * 1000.0,
+                error=None,
+            )
 
             self._model = model
             self._tokenizer = tokenizer
             LOGGER.info("model loaded on %s", self._device_label)
             _log_memory_snapshot(self._device_label)
             self._load_error = None
+
+            duration_ms = (time.perf_counter() - load_started) * 1000.0
+            params = None
+            if hasattr(self._model, "num_parameters"):
+                try:
+                    params = int(self._model.num_parameters())  # type: ignore[call-arg]
+                except Exception:  # pragma: no cover - depends on backend
+                    params = None
+            config_payload = None
+            if getattr(self._model, "config", None) is not None:
+                try:
+                    config_payload = {
+                        "model_type": getattr(self._model.config, "model_type", None),
+                        "torch_dtype": str(getattr(self._model.config, "torch_dtype", None)),
+                        "max_position_embeddings": getattr(
+                            self._model.config, "max_position_embeddings", None
+                        ),
+                    }
+                except Exception:  # pragma: no cover - defensive guard
+                    config_payload = None
+
+            emit_model_load_success(
+                model_name=self.model_name,
+                device_map=_format_device_map(successful_map or {}),
+                duration_ms=duration_ms,
+                params=params,
+                peak_memory_mb=None,
+                config=config_payload,
+            )
 
     def _build_prompt(self, user_prompt: str) -> str:
         user_content = user_prompt.strip()
@@ -492,6 +586,11 @@ def _resolve_model_path_from_env() -> Optional[str]:
         if key != "LLM_MODEL_PATH":
             LOGGER.info("Resolved model path via %s: %s", key, candidate)
 
+        if candidate not in _INSPECTED_PATHS:
+            _INSPECTED_PATHS.add(candidate)
+            emit_model_path_inspection(candidate)
+            emit_model_permissions(candidate)
+
         return candidate
 
     return None
@@ -523,6 +622,12 @@ def get_llm() -> LLM:
     if _env_flag("LLM_STUB"):
         LOGGER.warning("LLM_STUB flag enabled; using stub responses only.")
         _GLOBAL_STUB.update_reason("LLM_STUB flag enabled; model loading disabled.")
+        emit_llm_provider_init(
+            provider="stub",
+            ready=False,
+            max_tokens=_env_int("LLM_MAX_TOKENS"),
+            temperature=_env_float("LLM_TEMPERATURE"),
+        )
         _GLOBAL_LLM = _GLOBAL_STUB
         return _GLOBAL_LLM
 
@@ -535,10 +640,22 @@ def get_llm() -> LLM:
         _GLOBAL_STUB.update_reason(
             "LLM_MODEL_PATH/LLM_BG1_PATH/LLM_BG2_PATH are not configured."
         )
+        emit_llm_provider_init(
+            provider="stub",
+            ready=False,
+            max_tokens=_env_int("LLM_MAX_TOKENS"),
+            temperature=_env_float("LLM_TEMPERATURE"),
+        )
         _GLOBAL_LLM = _GLOBAL_STUB
         return _GLOBAL_LLM
 
     _GLOBAL_LLM = TransformersLLM(config, stub=_GLOBAL_STUB)
+    emit_llm_provider_init(
+        provider="transformers",
+        ready=False,
+        max_tokens=_env_int("LLM_MAX_TOKENS"),
+        temperature=_env_float("LLM_TEMPERATURE"),
+    )
     return _GLOBAL_LLM
 
 
@@ -574,6 +691,7 @@ def load_llm_on_startup() -> Tuple[bool, Optional[Exception]]:
         llm.preload()
     except Exception as error:  # pragma: no cover - depends on environment
         LOGGER.exception("failed to load model %s", llm.model_name)
+        emit_exception(module=__name__, error=error)
         return True, error
 
     LOGGER.info("model loaded")

@@ -37,12 +37,17 @@ class MinimalJSONFormatter(logging.Formatter):
     }
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401 - inherited
-        log_record: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc)
+        timestamp = (
+            datetime.fromtimestamp(record.created, tz=timezone.utc)
             .isoformat()
-            .replace("+00:00", "Z"),
+            .replace("+00:00", "Z")
+        )
+
+        log_record: dict[str, Any] = {
+            "ts": timestamp,
+            "timestamp": timestamp,
             "level": record.levelname,
-            "logger": record.name,
+            "module": record.name,
         }
 
         message = record.getMessage()
