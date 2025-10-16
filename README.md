@@ -71,29 +71,39 @@ docker compose -f docker-compose.dev.yml up --build
 docker compose -f docker-compose.local.yml up --build
 ```
 
-### Продакшн / GPU-профиль
+### Запуск с GPU
 
-Для полноценного окружения с поддержкой GPU используйте базовый compose-файл в
-сочетании с GPU-оверлеем. Перед запуском убедитесь, что установлен
-`nvidia-container-toolkit` и демон Docker настроен на использование GPU.
+В GPU-профиле используется отдельный compose-файл `docker-compose.gpu.yml`, который
+подключает GPU через `device_requests` и включает раннюю загрузку модели. Перед
+стартом убедитесь, что `nvidia-container-toolkit` установлен и демон Docker
+поддерживает флаг `--gpus`.
 
-```bash
-docker build --build-arg INSTALL_HEAVY=true --build-arg USE_CUDA=true -t legal-bot-gpu .
+Пример секции `.env` для GPU-развёртывания:
+
+```ini
+USE_GPU=true
+FORCE_LOAD_ON_START=true
+LLM_MODEL_PATH=/models/bgpt-7b
+CHROMA_PERSIST_DIR=/chroma_db
 ```
 
-Команда выше собирает образ, в котором PyTorch переустанавливается с CUDA-колёсика
-(`cu121` по умолчанию). При необходимости можно указать переменные `TORCH_VERSION`
-и `TORCH_CUDA_CHANNEL` во время `docker build` для выбора другой сборки.
+Соберите и запустите сервис одной командой:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
+docker compose -f docker-compose.gpu.yml up -d --build
 ```
 
-Контейнер смонтирует локальные директории `./models` и `./chroma_db`, что позволяет
-повторно использовать скачанные модели и сохранённые эмбеддинги между перезапусками.
-GPU-профиль собирает образ из стадии `heavy`, устанавливающей PyTorch, transformers
-и другие ресурсоёмкие зависимости. Для CPU-only окружений убедитесь, что переменная
-`INSTALL_HEAVY` в `.env` выключена, чтобы сборка не тянула лишние пакеты.
+После сборки можно быстро проверить доступность CUDA внутри образа:
+
+```bash
+docker run --rm --gpus all legal-bot-app:latest \
+  python3 -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"
+```
+
+Контейнер по-прежнему монтирует локальные директории `./models`, `./chroma_db` и
+`./src`, поэтому модели и база Chroma сохраняются между перезапусками. Флаги
+`USE_GPU` и `FORCE_LOAD_ON_START` управляют стратегией загрузки весов и позволяют
+инициализировать модель на этапе запуска контейнера.
 
 ### Готовые скрипты для smoke-тестов
 

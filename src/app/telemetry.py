@@ -1,6 +1,7 @@
 """Centralised observability helpers for structured lifecycle logging."""
 
 from __future__ import annotations
+import json
 import logging
 import os
 import platform
@@ -26,6 +27,7 @@ _ENV_KEYS_TO_LOG: tuple[str, ...] = (
     "LLM_PROVIDER",
     "INSTALL_HEAVY",
     "FORCE_LOAD_ON_START",
+    "USE_GPU",
     "CHROMA_PERSIST_DIR",
     "OCR_LANG",
     "LLM_DEVICE",
@@ -105,6 +107,25 @@ def _parse_nvidia_smi(output: str) -> list[NvidiaSMIRecord]:
             )
         )
     return records
+
+
+def _capture_nvidia_smi() -> dict[str, Any]:
+    command = [
+        "nvidia-smi",
+        "--query-gpu=index,name,memory.total,memory.used,utilization.gpu",
+        "--format=csv,noheader,nounits",
+    ]
+    returncode, stdout, stderr = _run_command(command)
+    records = None
+    if returncode == 0 and stdout:
+        records = [record.__dict__ for record in _parse_nvidia_smi(stdout)]
+    return {
+        "command": command,
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "records": records,
+    }
 
 
 def _try_parse_int(value: str | None) -> Optional[int]:
@@ -214,27 +235,36 @@ def _read_proc_mounts(max_entries: int = 20) -> list[str]:
     return mounts
 
 
-def emit_gpu_detection() -> None:
-    returncode, stdout, stderr = _run_command(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,name,memory.total,memory.used,utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ]
-    )
-
-    nvidia_records: list[dict[str, Any]] | None = None
-    if returncode == 0 and stdout:
-        nvidia_records = [record.__dict__ for record in _parse_nvidia_smi(stdout)]
-
-    torch_info = _collect_torch_info()
-
+def emit_gpu_runtime_check() -> dict[str, Any]:
+    snapshot = _capture_nvidia_smi()
     details = {
-        "nvidia_smi": nvidia_records,
-        "nvidia_smi_error": None if returncode == 0 else stderr or "nvidia-smi unavailable",
-        "torch": torch_info,
+        "records": snapshot.get("records"),
+        "returncode": snapshot.get("returncode"),
+        "stderr": snapshot.get("stderr"),
     }
+    level = "info" if snapshot.get("returncode") == 0 else "warning"
+    log_event(LOGGER, "gpu.runtime_check", level=level, details=details)
+    return details
 
+
+def emit_gpu_torch_check() -> dict[str, Any]:
+    torch_info = _collect_torch_info()
+    level = "info"
+    if torch_info.get("error"):
+        level = "warning"
+    elif torch_info.get("cuda_available") is False:
+        level = "warning"
+    log_event(LOGGER, "gpu.torch_check", level=level, details=torch_info)
+    return torch_info
+
+
+def emit_gpu_detection() -> None:
+    runtime_details = emit_gpu_runtime_check()
+    torch_details = emit_gpu_torch_check()
+    details = {
+        "runtime": runtime_details,
+        "torch": torch_details,
+    }
     log_event(LOGGER, "gpu.detect", details=details)
 
 
@@ -402,6 +432,31 @@ def emit_model_load_start(
     log_event(LOGGER, "model.load.start", details=details)
 
 
+def emit_model_load_progress(
+    *,
+    stage: str,
+    attempt: int,
+    total: int,
+    device_map: object | None = None,
+    dtype: str | None = None,
+    use_gpu: bool | None = None,
+    error: BaseException | str | None = None,
+) -> None:
+    details: dict[str, Any] = {
+        "stage": stage,
+        "attempt": attempt,
+        "total": total,
+    }
+    if device_map is not None:
+        details["device_map"] = device_map
+    if dtype is not None:
+        details["dtype"] = dtype
+    if use_gpu is not None:
+        details["use_gpu"] = use_gpu
+    level = "error" if error else "info"
+    log_event(LOGGER, "model.load.progress", level=level, details=details, exc=error)
+
+
 def emit_tokenizer_event(*, path: str, duration_ms: float, error: BaseException | None = None) -> None:
     level = "error" if error else "info"
     details = {"path": path, "duration_ms": round(duration_ms, 3)}
@@ -470,6 +525,20 @@ def emit_model_load_success(
         "config": config,
     }
     log_event(LOGGER, "model.load.success", duration_ms=duration_ms, details=details)
+
+
+def emit_model_load_error(
+    *,
+    model_path: str,
+    attempts: int,
+    errors: list[dict[str, Any]],
+) -> None:
+    details = {
+        "model_path": model_path,
+        "attempts": attempts,
+        "errors": errors,
+    }
+    log_event(LOGGER, "model.load.error", level="error", details=details)
 
 
 def emit_llm_provider_init(
@@ -668,16 +737,10 @@ def emit_resources_snapshot() -> None:
 
 
 def _current_gpu_snapshot() -> dict[str, Any] | None:
-    returncode, stdout, _ = _run_command(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,name,memory.total,memory.used",
-            "--format=csv,noheader,nounits",
-        ]
-    )
-    if returncode != 0 or not stdout:
+    snapshot = _capture_nvidia_smi()
+    if snapshot.get("returncode") != 0 or not snapshot.get("records"):
         return None
-    return {"records": [record.__dict__ for record in _parse_nvidia_smi(stdout)]}
+    return {"records": snapshot.get("records")}
 
 
 def _read_memory_info() -> dict[str, Any]:
@@ -716,6 +779,39 @@ def _disk_usage_summary() -> dict[str, Any]:
     return summaries
 
 
+def _collect_host_config() -> dict[str, Any]:
+    container_id = os.getenv("HOSTNAME")
+    if not container_id:
+        return {"error": "HOSTNAME not available"}
+    returncode, stdout, stderr = _run_command(["docker", "inspect", container_id])
+    if returncode != 0:
+        return {
+            "returncode": returncode,
+            "stderr": stderr or "docker inspect unavailable",
+            "container_id": container_id,
+        }
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as error:
+        return {
+            "returncode": returncode,
+            "stderr": f"failed to decode docker inspect output: {error}",
+            "container_id": container_id,
+        }
+    host_config = None
+    if isinstance(payload, list) and payload:
+        host_config = payload[0].get("HostConfig")  # type: ignore[index]
+    return {"container_id": container_id, "host_config": host_config}
+
+
+def collect_gpu_debug_snapshot() -> dict[str, Any]:
+    return {
+        "runtime": _capture_nvidia_smi(),
+        "torch": _collect_torch_info(),
+        "host_config": _collect_host_config(),
+    }
+
+
 @contextmanager
 def traced_duration(step: str, *, logger: Optional[logging.Logger] = None, **fields: Any) -> Iterator[None]:
     start = time.perf_counter()
@@ -745,16 +841,20 @@ def _resolve_git_commit() -> Optional[str]:
 __all__ = [
     "emit_app_startup_event",
     "emit_container_context",
+    "emit_gpu_runtime_check",
+    "emit_gpu_torch_check",
     "emit_gpu_detection",
     "emit_env_versions",
     "emit_numpy_compat_error",
     "emit_model_path_inspection",
     "emit_model_permissions",
     "emit_model_load_start",
+    "emit_model_load_progress",
     "emit_model_shard_map",
     "emit_model_shard_load",
     "emit_model_allocation",
     "emit_model_load_success",
+    "emit_model_load_error",
     "emit_tokenizer_event",
     "emit_llm_provider_init",
     "emit_inference_request",
@@ -767,6 +867,7 @@ __all__ = [
     "emit_ingest_event",
     "emit_exception",
     "emit_resources_snapshot",
+    "collect_gpu_debug_snapshot",
     "traced_duration",
     "log_event",
 ]
