@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import random
+import time
 from functools import lru_cache
 from typing import List, Sequence
 
@@ -13,6 +14,8 @@ DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 FALLBACK_DIMENSION = 384
 
 LOGGER = logging.getLogger(LOGGER_NAME)
+
+from app.telemetry import emit_embeddings_event
 
 
 def _install_heavy_enabled() -> bool:
@@ -37,11 +40,13 @@ class EmbeddingModel:
         self._model = None
         self._dimension = FALLBACK_DIMENSION
         self._embedder = self._fallback_embed_texts
+        self._model_name = model_path
 
         if not _install_heavy_enabled():
             LOGGER.info(
                 "INSTALL_HEAVY is disabled; using deterministic fallback embeddings."
             )
+            self._model_name = "deterministic-fallback"
             return
 
         try:
@@ -51,6 +56,7 @@ class EmbeddingModel:
                 "sentence-transformers is unavailable; using deterministic fallback embeddings (%s).",
                 error,
             )
+            self._model_name = "deterministic-fallback"
             return
 
         try:
@@ -63,6 +69,7 @@ class EmbeddingModel:
                 error,
             )
             self._model = None
+            self._model_name = "deterministic-fallback"
             return
 
         self._dimension = int(self._model.get_sentence_embedding_dimension())
@@ -71,7 +78,24 @@ class EmbeddingModel:
     def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:
         if not texts:
             return []
-        return self._embedder(texts)
+        started = time.perf_counter()
+        try:
+            embeddings = self._embedder(texts)
+        except Exception as error:
+            emit_embeddings_event(
+                model=self._model_name,
+                count=len(texts),
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                errors=[str(error)],
+            )
+            raise
+
+        emit_embeddings_event(
+            model=self._model_name,
+            count=len(texts),
+            duration_ms=(time.perf_counter() - started) * 1000.0,
+        )
+        return embeddings
 
     def _embed_texts_with_model(self, texts: Sequence[str]) -> List[List[float]]:
         embeddings = self._model.encode(  # type: ignore[union-attr]

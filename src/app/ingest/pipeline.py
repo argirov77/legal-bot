@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 from .chunking import ChunkingConfig, SemanticTextChunker
 from .extractors import DocxExtractor, PDFExtractor, PDFExtractionResult, TextExtractor
@@ -24,6 +25,14 @@ class IngestPipelineConfig:
     pdf_min_text_ratio: float = 0.05
 
 
+@dataclass(slots=True)
+class IngestStatistics:
+    language: Optional[str]
+    page_count: int
+    ocr_performed: bool
+    duration_seconds: float
+
+
 class IngestPipeline:
     """Pipeline orchestrating document extraction, normalisation and chunking."""
 
@@ -40,6 +49,11 @@ class IngestPipeline:
         )
         # TODO: Inject LLMProvider once available to enrich chunks with BgGPT/Gemma metadata.
         self.language_detector = LanguageDetector()
+        self._last_stats: IngestStatistics | None = None
+
+    @property
+    def last_statistics(self) -> IngestStatistics | None:
+        return self._last_stats
 
     def ingest(
         self,
@@ -50,11 +64,13 @@ class IngestPipeline:
     ) -> List[DocumentChunk]:
         """Process an uploaded file and return embedding-ready chunks."""
 
+        started = time.perf_counter()
         document_format = DocumentFormatDetector.detect(file_name, mime_type)
         file_id = file_id or str(uuid.uuid4())
         LOGGER.info("Processing file %s (%s) with id %s", file_name, document_format, file_id)
 
-        pages = self._extract_pages(file_bytes, document_format)
+        pages, ocr_performed = self._extract_pages(file_bytes, document_format)
+        pages = list(pages)
         normalized_pages = [
             PageContent(page_number=page.page_number, text=normalize_text(page.text), char_offset=page.char_offset)
             for page in pages
@@ -64,16 +80,25 @@ class IngestPipeline:
 
         chunks = list(self.chunker.chunk_pages(normalized_pages, file_id, file_name, language))
         LOGGER.info("Generated %s chunks for file %s", len(chunks), file_name)
+        duration = time.perf_counter() - started
+        self._last_stats = IngestStatistics(
+            language=language,
+            page_count=len(normalized_pages),
+            ocr_performed=ocr_performed,
+            duration_seconds=duration,
+        )
         return chunks
 
-    def _extract_pages(self, file_bytes: bytes, document_format: DocumentFormat) -> Iterable[PageContent]:
+    def _extract_pages(
+        self, file_bytes: bytes, document_format: DocumentFormat
+    ) -> Tuple[Iterable[PageContent], bool]:
         if document_format is DocumentFormat.PDF:
             result: PDFExtractionResult = self.pdf_extractor.extract(file_bytes)
             if result.ocr_performed:
                 LOGGER.info("OCR performed on PDF document")
-            return result.pages
+            return result.pages, result.ocr_performed
         if document_format is DocumentFormat.DOCX:
-            return list(self.docx_extractor.extract(file_bytes))
+            return list(self.docx_extractor.extract(file_bytes)), False
         if document_format is DocumentFormat.TXT:
-            return list(self.text_extractor.extract(file_bytes))
+            return list(self.text_extractor.extract(file_bytes)), False
         raise ValueError(f"Unsupported document format: {document_format}")
