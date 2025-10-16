@@ -65,6 +65,10 @@ def read_root() -> str:
 @app.get("/healthz", response_class=PlainTextResponse)
 def healthcheck() -> str:
     """Liveness probe used by container orchestrators."""
+    status = get_llm_status()
+    if not status.model_loaded:
+        detail = status.error or "LLM model is not loaded"
+        raise HTTPException(status_code=503, detail=detail)
 
     return "ok"
 

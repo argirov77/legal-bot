@@ -78,6 +78,14 @@ docker compose -f docker-compose.local.yml up --build
 `nvidia-container-toolkit` и демон Docker настроен на использование GPU.
 
 ```bash
+docker build --build-arg INSTALL_HEAVY=true --build-arg USE_CUDA=true -t legal-bot-gpu .
+```
+
+Команда выше собирает образ, в котором PyTorch переустанавливается с CUDA-колёсика
+(`cu121` по умолчанию). При необходимости можно указать переменные `TORCH_VERSION`
+и `TORCH_CUDA_CHANNEL` во время `docker build` для выбора другой сборки.
+
+```bash
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
 ```
 
@@ -108,7 +116,9 @@ GPU-профиль собирает образ из стадии `heavy`, уст
   зависимости (PyTorch, sentence-transformers и т.п.).
 * `FORCE_LOAD_ON_START` — принудительная загрузка модели даже в лёгком образе (если
   путь к весам указан и зависимости доступны).
-* `LLM_MODEL_PATH` — каталог модели внутри контейнера, например `/models/bgpt-7b`.
+* `LLM_MODEL_PATH` — каталог модели внутри контейнера, например `/models/bgpt-7b`. Если
+  значение не задано, загрузчик проверит `LLM_BG1_PATH`, затем `LLM_BG2_PATH` (для
+  обратной совместимости со старыми переменными).
 * `LLM_DEVICE` — высокоуровневый выбор устройства (`cpu`, `cuda`, `auto`). При
   необходимости можно задать низкоуровневую стратегию в `LLM_DEVICE_MAP`.
 * `LLM_TORCH_DTYPE` — тип тензоров (`float16`, `float32`, `bfloat16`).
@@ -119,7 +129,7 @@ GPU-профиль собирает образ из стадии `heavy`, уст
 загрузить модель во время события `startup` и пишет в логах сообщения вида:
 
 ```
-[INFO] app.llm_provider: attempting to load model /models/bgpt-7b
+[INFO] app.llm_provider: trying to load LLM from /models/bgpt-7b (device_map=single, dtype=float16, low_cpu_mem_usage=True)
 [INFO] app.llm_provider: model loaded
 ```
 
@@ -128,11 +138,11 @@ GPU-профиль собирает образ из стадии `heavy`, уст
 добавлен сценарий:
 
 ```bash
-python scripts/test_load_model.py --force
+python scripts/check_model.py
 ```
 
-Он запускает те же проверки, что и сервер, и завершится кодом 1, если модель не
-загрузилась.
+Скрипт использует те же настройки, что и сервер. Если модель не загрузится, он
+вернёт ненулевой код возврата и напечатает причину.
 
 ## Разработка без Docker
 
@@ -190,14 +200,26 @@ models/
 ```
 
 Убедитесь, что имена директорий соответствуют путям в переменных окружения
-`EMBEDDING_MODEL_PATH` и `LLM_MODEL_PATH`. Чтобы переключиться на альтернативную
-болгарскую модель (например, Gemma 2 BG), измените значение `LLM_MODEL_PATH`
-на `/models/gemma-2-bg` и перезапустите сервис.
+`EMBEDDING_MODEL_PATH` и `LLM_MODEL_PATH`. Если основной ключ не задан, сервис
+попробует `LLM_BG1_PATH`, затем `LLM_BG2_PATH` — это облегчает миграцию со старых
+конфигураций. Чтобы переключиться на альтернативную болгарскую модель (например,
+Gemma 2 BG), измените значение `LLM_MODEL_PATH` на `/models/gemma-2-bg` и
+перезапустите сервис.
+
+После сборки контейнера можно проверить загрузку модели вручную:
+
+```bash
+docker compose run --rm app python scripts/check_model.py
+```
+
+Команда завершится успешно, если веса доступны и подходят выбранному устройству.
 
 ## Проверка состояния модели
 
-API предоставляет отдельный health-check, который сообщает статус загрузки LLM и
-устройство инференса:
+API предоставляет отдельные health-check-и. Эндпоинт `/healthz` возвращает `503`,
+пока модель не загружена (например, если веса отсутствуют или PyTorch не
+установлен). Для детальной информации используйте `/healthz/model`, который
+сообщает статус загрузки LLM и устройство инференса:
 
 ```bash
 curl http://localhost:8000/healthz/model | jq

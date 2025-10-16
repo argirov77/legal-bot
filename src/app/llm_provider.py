@@ -26,12 +26,18 @@ LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+MODEL_PATH_ENV_KEYS: tuple[str, str, str] = (
+    "LLM_MODEL_PATH",
+    "LLM_BG1_PATH",
+    "LLM_BG2_PATH",
+)
+
 SYSTEM_PROMPT_BG = (
     "You are a legal assistant. Answer in Bulgarian, use only provided sources. "
     "If topic not covered by sources, reply: 'Нямам достатъчно информация в заредените документи.'"
 )
 
-DEFAULT_STUB_RESPONSE = "Моделът в момента не е наличен. Моля, опитайте отново по-късно."
+DEFAULT_STUB_RESPONSE = "Моделът в момента не е наличен. Моля, опитайте по-късно."
 
 
 @dataclass(slots=True)
@@ -148,6 +154,37 @@ def _resolve_dtype(value: str | None) -> Optional["torch.dtype"]:
     return mapping.get(normalised, torch.float16)
 
 
+def _format_device_map(device_map: object) -> str:
+    if isinstance(device_map, str):
+        return device_map
+    if isinstance(device_map, dict):
+        return ", ".join(f"{key or '<model>'}->{value}" for key, value in device_map.items())
+    return repr(device_map)
+
+
+def _log_memory_snapshot(device_label: str) -> None:
+    if torch is None:
+        return
+
+    if device_label.startswith("cuda") and torch.cuda.is_available():  # pragma: no cover
+        try:
+            device_index = torch.cuda.current_device()
+            total = torch.cuda.get_device_properties(device_index).total_memory
+            allocated = torch.cuda.memory_allocated(device_index)
+            reserved = torch.cuda.memory_reserved(device_index)
+        except Exception as error:  # pragma: no cover - depends on drivers
+            LOGGER.debug("Unable to collect CUDA memory statistics: %s", error)
+            return
+
+        gib = float(1024**3)
+        LOGGER.info(
+            "CUDA memory stats: allocated=%.2f GiB reserved=%.2f GiB total=%.2f GiB",
+            allocated / gib,
+            reserved / gib,
+            total / gib,
+        )
+
+
 def _single_device_map() -> tuple[object, str]:
     if torch is None or not torch.cuda.is_available():  # pragma: no cover - depends on hw
         LOGGER.warning(
@@ -257,8 +294,13 @@ class TransformersLLM(LLM):
                     "PyTorch/Transformers are not available in the current environment"
                 ) from base_error
 
-            LOGGER.info("loading model... (source=%s)", self._config.model_path)
             device_map, device_label = _resolve_device_map(self._config.device_strategy)
+            dtype = self._config.torch_dtype
+            dtype_label = getattr(dtype, "name", str(dtype)) if dtype is not None else "auto"
+            candidates: list[tuple[object, str]] = [(device_map, device_label)]
+            cpu_candidate: tuple[object, str] = ({"": "cpu"}, "cpu")
+            if all(label != "cpu" for _, label in candidates):
+                candidates.append(cpu_candidate)
 
             if self._config.quantization:
                 LOGGER.warning(
@@ -266,49 +308,45 @@ class TransformersLLM(LLM):
                     self._config.quantization,
                 )
 
-            try:
-                model = AutoModelForCausalLM.from_pretrained(
+            errors: list[tuple[str, Exception]] = []
+            model = None
+            for current_map, current_label in candidates:
+                LOGGER.info(
+                    "trying to load LLM from %s (device_map=%s, dtype=%s, low_cpu_mem_usage=True)",
                     self._config.model_path,
-                    device_map=device_map,
-                    torch_dtype=self._config.torch_dtype,
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=False,
+                    _format_device_map(current_map),
+                    dtype_label,
                 )
-                self._device_label = device_label
+                try:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        self._config.model_path,
+                        device_map=current_map,
+                        torch_dtype=self._config.torch_dtype,
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=False,
+                    )
+                except Exception as error:  # pragma: no cover - depends on hw/config
+                    errors.append((current_label, error))
+                    LOGGER.warning(
+                        "Failed to load LLM on %s: %s",
+                        current_label,
+                        error,
+                    )
+                    continue
+
+                self._device_label = current_label
                 self._inference_device = (
                     "cuda:0"
-                    if "cuda" in device_label and torch.cuda.is_available()
+                    if current_label.startswith("cuda") and torch.cuda.is_available()
                     else "cpu"
                 )
-            except Exception as first_error:  # pragma: no cover - depends on hw/config
-                if self._config.device_strategy.strip().lower() == "auto":
-                    LOGGER.warning(
-                        "device_map=auto failed (%s); retrying with single GPU fallback.",
-                        first_error,
-                    )
-                    device_map, device_label = _single_device_map()
-                    try:
-                        model = AutoModelForCausalLM.from_pretrained(
-                            self._config.model_path,
-                            device_map=device_map,
-                            torch_dtype=self._config.torch_dtype,
-                            low_cpu_mem_usage=True,
-                            trust_remote_code=False,
-                        )
-                        self._device_label = device_label
-                        self._inference_device = (
-                            "cuda:0"
-                            if "cuda" in device_label and torch.cuda.is_available()
-                            else "cpu"
-                        )
-                    except Exception as second_error:  # pragma: no cover - optional path
-                        self._load_error = second_error
-                        raise LLMNotReadyError(
-                            "Failed to load the language model with any supported device_map."
-                        ) from second_error
-                else:
-                    self._load_error = first_error
-                    raise LLMNotReadyError("Failed to load the language model") from first_error
+                break
+
+            if model is None:
+                last_label, last_error = errors[-1] if errors else ("unknown", RuntimeError("Unknown load failure"))
+                self._load_error = last_error
+                self._stub.update_reason(f"Failed to load model on {last_label}: {last_error}")
+                raise LLMNotReadyError("Failed to load the language model") from last_error
 
             try:
                 tokenizer = AutoTokenizer.from_pretrained(self._config.model_path)
@@ -319,11 +357,13 @@ class TransformersLLM(LLM):
                     tokenizer.pad_token_id = tokenizer.eos_token_id
             except Exception as error:  # pragma: no cover - depends on model files
                 self._load_error = error
+                self._stub.update_reason(f"Failed to load tokenizer: {error}")
                 raise LLMNotReadyError("Failed to load tokenizer") from error
 
             self._model = model
             self._tokenizer = tokenizer
             LOGGER.info("model loaded on %s", self._device_label)
+            _log_memory_snapshot(self._device_label)
             self._load_error = None
 
     def _build_prompt(self, user_prompt: str) -> str:
@@ -337,6 +377,7 @@ class TransformersLLM(LLM):
             self._ensure_loaded()
         except LLMNotReadyError as error:  # pragma: no cover - depends on env
             LOGGER.warning("falling back to stub: %s", error)
+            self._stub.update_reason(str(error))
             return self._stub.generate(prompt, max_tokens, temperature)
 
         if self._model is None or self._tokenizer is None:
@@ -438,8 +479,26 @@ def _normalise_model_path(raw_path: str | None) -> Optional[str]:
     return str(path)
 
 
+def _resolve_model_path_from_env() -> Optional[str]:
+    for key in MODEL_PATH_ENV_KEYS:
+        raw_value = os.getenv(key)
+        if raw_value is None:
+            continue
+
+        candidate = _normalise_model_path(raw_value)
+        if not candidate:
+            continue
+
+        if key != "LLM_MODEL_PATH":
+            LOGGER.info("Resolved model path via %s: %s", key, candidate)
+
+        return candidate
+
+    return None
+
+
 def _build_config() -> Optional[_LLMConfig]:
-    model_path = _normalise_model_path(os.getenv("LLM_MODEL_PATH"))
+    model_path = _resolve_model_path_from_env()
     if not model_path:
         return None
     device_strategy = _resolve_device_strategy()
@@ -470,9 +529,12 @@ def get_llm() -> LLM:
     config = _build_config()
     if config is None:
         LOGGER.warning(
-            "LLM_MODEL_PATH is not configured; falling back to stub responses."
+            "Model path variables %s are not configured; using stub responses.",
+            ", ".join(MODEL_PATH_ENV_KEYS),
         )
-        _GLOBAL_STUB.update_reason("LLM_MODEL_PATH is not configured.")
+        _GLOBAL_STUB.update_reason(
+            "LLM_MODEL_PATH/LLM_BG1_PATH/LLM_BG2_PATH are not configured."
+        )
         _GLOBAL_LLM = _GLOBAL_STUB
         return _GLOBAL_LLM
 
@@ -494,10 +556,11 @@ def load_llm_on_startup() -> Tuple[bool, Optional[Exception]]:
     if not _should_attempt_startup_load():
         return False, None
 
-    model_path = os.getenv("LLM_MODEL_PATH")
+    model_path = _resolve_model_path_from_env()
     if not model_path:
         LOGGER.info(
-            "Startup model loading requested but LLM_MODEL_PATH is not configured; skipping."
+            "Startup model loading requested but no model path variables (%s) are configured; skipping.",
+            ", ".join(MODEL_PATH_ENV_KEYS),
         )
         return False, None
 
@@ -506,7 +569,7 @@ def load_llm_on_startup() -> Tuple[bool, Optional[Exception]]:
         LOGGER.info("Startup model loading requested but LLM stub backend is active; skipping.")
         return False, None
 
-    LOGGER.info("attempting to load model %s", llm.model_name)
+    LOGGER.info("trying to load LLM from %s", model_path)
     try:
         llm.preload()
     except Exception as error:  # pragma: no cover - depends on environment

@@ -42,14 +42,23 @@ RUN mkdir -p /models /chroma_db /data \
 
 FROM runtime-base AS runtime
 ARG INSTALL_HEAVY=false
+ARG USE_CUDA=false
 ENV INSTALL_HEAVY=${INSTALL_HEAVY}
+ENV USE_CUDA=${USE_CUDA}
 
 RUN --mount=type=cache,target=/root/.cache/pip python - <<'PY'
 import os
 import subprocess
 
-value = os.environ.get("INSTALL_HEAVY", "false").strip().lower()
-if value in {"1", "true", "yes", "on"}:
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+install_heavy = _env_flag("INSTALL_HEAVY")
+use_cuda = install_heavy and _env_flag("USE_CUDA")
+
+if install_heavy:
     subprocess.check_call([
         "python",
         "-m",
@@ -61,6 +70,24 @@ if value in {"1", "true", "yes", "on"}:
         "-c",
         "constraints.txt",
     ])
+
+    if use_cuda:
+        cuda_channel = os.environ.get("TORCH_CUDA_CHANNEL", "cu121")
+        torch_version = os.environ.get("TORCH_VERSION", "2.3.1")
+        spec = f"torch=={torch_version}+{cuda_channel}"
+        subprocess.check_call([
+            "python",
+            "-m",
+            "pip",
+            "install",
+            "--no-cache-dir",
+            "--force-reinstall",
+            spec,
+            "--index-url",
+            f"https://download.pytorch.org/whl/{cuda_channel}",
+            "--extra-index-url",
+            "https://pypi.org/simple",
+        ])
 PY
 
 EXPOSE 8000
