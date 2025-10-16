@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  app:
+    extends:
+      file: docker-compose.dev.yml
+      service: app
+    build:
+      target: dev
+      args:
+        INSTALL_HEAVY: "false"
+    environment:
+      INSTALL_HEAVY: "false"
+      FORCE_LOAD_ON_START: "false"

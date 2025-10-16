@@ -18,6 +18,8 @@ services:
     environment:
       - PYTHONPATH=/app/src
       - PYTHONUNBUFFERED=1
+      - INSTALL_HEAVY=false
+      - FORCE_LOAD_ON_START=false
     ports:
       - "8000:8000"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000

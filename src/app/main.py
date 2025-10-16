@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any, Callable, TypeVar
 
@@ -14,14 +15,23 @@ from app.vectorstore import (
     VectorStoreUnavailableError,
     get_vector_store,
 )
-from app.llm_provider import get_llm
+from app.llm_provider import get_llm, get_llm_status, load_llm_on_startup
 
 # TODO: Wire LLMProvider dependency to expose BgGPT/Gemma completion endpoints.
 
 configure_logging()
 
+LOGGER = logging.getLogger(__name__)
+
 app = FastAPI(title="Legal Bot API")
 app.include_router(rag_router)
+
+
+@app.on_event("startup")
+async def _startup_model_loader() -> None:
+    """Optionally preload the local LLM when requested via environment flags."""
+
+    load_llm_on_startup()
 
 
 T = TypeVar("T")
@@ -99,16 +109,34 @@ def readiness_probe() -> str:
     return "ok"
 
 
+@app.get("/healthz/model")
+def model_healthcheck() -> dict[str, object]:
+    """Expose eager/lazy model loading status and device placement."""
+
+    status = get_llm_status()
+    payload: dict[str, object] = {
+        "model_loaded": status.model_loaded,
+        "device": status.device,
+        "name": status.model_name,
+    }
+    if status.error:
+        payload["reason"] = status.error
+    return payload
+
+
 @app.get("/model_status")
 def model_status() -> dict[str, object]:
-    """Expose lazy model loading status and device placement."""
+    """Expose lazy model loading status for backwards compatibility."""
 
-    llm = get_llm()
-    return {
-        "model_loaded": llm.model_loaded,
-        "model_name": llm.model_name,
-        "device": llm.device,
+    status = get_llm_status()
+    payload: dict[str, object] = {
+        "model_loaded": status.model_loaded,
+        "model_name": status.model_name,
+        "device": status.device,
     }
+    if status.error:
+        payload["reason"] = status.error
+    return payload
 
 
 class QueryRequest(BaseModel):
