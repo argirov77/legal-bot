@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Tuple
 
 
@@ -22,6 +23,8 @@ else:  # pragma: no cover - executed when heavy deps installed
 
 
 LOGGER = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 SYSTEM_PROMPT_BG = (
     "You are a legal assistant. Answer in Bulgarian, use only provided sources. "
@@ -383,8 +386,60 @@ _GLOBAL_LLM: Optional[LLM] = None
 _GLOBAL_STUB = LLMStub()
 
 
+def _normalise_model_path(raw_path: str | None) -> Optional[str]:
+    if raw_path is None:
+        return None
+
+    candidate = raw_path.strip()
+    if not candidate:
+        return None
+
+    expanded = os.path.expanduser(candidate)
+    path = Path(expanded)
+
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+
+    if path.exists():
+        return str(path)
+
+    docker_root = Path("/models")
+    fallback_path: Optional[Path] = None
+
+    try:
+        relative_to_docker = Path(expanded).relative_to(docker_root)
+    except ValueError:
+        relative_to_docker = None
+
+    if relative_to_docker is not None:
+        fallback_candidate = PROJECT_ROOT / "models" / relative_to_docker
+        if fallback_candidate.exists():
+            fallback_path = fallback_candidate
+    elif expanded.startswith(str(docker_root)):
+        relative_suffix = expanded[len(str(docker_root)) :].lstrip(os.sep)
+        if relative_suffix:
+            fallback_candidate = PROJECT_ROOT / "models" / relative_suffix
+            if fallback_candidate.exists():
+                fallback_path = fallback_candidate
+
+    if fallback_path is not None:
+        LOGGER.info(
+            "Resolved LLM_MODEL_PATH '%s' to repository directory '%s'.",
+            raw_path,
+            fallback_path,
+        )
+        return str(fallback_path)
+
+    LOGGER.warning(
+        "Configured LLM_MODEL_PATH '%s' does not exist (resolved to '%s').",
+        raw_path,
+        path,
+    )
+    return str(path)
+
+
 def _build_config() -> Optional[_LLMConfig]:
-    model_path = os.getenv("LLM_MODEL_PATH")
+    model_path = _normalise_model_path(os.getenv("LLM_MODEL_PATH"))
     if not model_path:
         return None
     device_strategy = _resolve_device_strategy()
