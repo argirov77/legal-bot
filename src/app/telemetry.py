@@ -47,9 +47,14 @@ _ENV_KEYS_TO_LOG: tuple[str, ...] = (
 class NvidiaSMIRecord:
     index: int
     name: str
+    uuid: Optional[str] = None
+    temperature_gpu_c: Optional[float] = None
+    power_draw_w: Optional[float] = None
     memory_total_mb: Optional[int] = None
     memory_used_mb: Optional[int] = None
     utilisation_gpu: Optional[int] = None
+    pcie_link_gen_current: Optional[int] = None
+    pcie_link_width_current: Optional[int] = None
 
 
 def _safe_getuid() -> Optional[int]:  # pragma: no cover - platform dependent
@@ -95,16 +100,26 @@ def _parse_nvidia_smi(output: str) -> list[NvidiaSMIRecord]:
         except (TypeError, ValueError):
             continue
         name = parts[1] if len(parts) > 1 else "GPU"
-        total = _try_parse_int(parts[2]) if len(parts) > 2 else None
-        used = _try_parse_int(parts[3]) if len(parts) > 3 else None
-        util = _try_parse_int(parts[4]) if len(parts) > 4 else None
+        uuid = parts[2] if len(parts) > 2 else None
+        temperature = _try_parse_float(parts[3]) if len(parts) > 3 else None
+        power_draw = _try_parse_float(parts[4]) if len(parts) > 4 else None
+        total = _try_parse_int(parts[5]) if len(parts) > 5 else None
+        used = _try_parse_int(parts[6]) if len(parts) > 6 else None
+        util = _try_parse_int(parts[7]) if len(parts) > 7 else None
+        pcie_gen = _try_parse_int(parts[8]) if len(parts) > 8 else None
+        pcie_width = _try_parse_int(parts[9]) if len(parts) > 9 else None
         records.append(
             NvidiaSMIRecord(
                 index=index,
                 name=name,
+                uuid=uuid,
+                temperature_gpu_c=temperature,
+                power_draw_w=power_draw,
                 memory_total_mb=total,
                 memory_used_mb=used,
                 utilisation_gpu=util,
+                pcie_link_gen_current=pcie_gen,
+                pcie_link_width_current=pcie_width,
             )
         )
     return records
@@ -128,7 +143,7 @@ def _to_dict_safe(obj: Any) -> Dict[str, Any]:
 def _capture_nvidia_smi() -> dict[str, Any]:
     command = [
         "nvidia-smi",
-        "--query-gpu=index,name,memory.total,memory.used,utilization.gpu",
+        "--query-gpu=index,name,uuid,temperature.gpu,power.draw,memory.total,memory.used,utilization.gpu,pcie.link.gen.current,pcie.link.width.current",
         "--format=csv,noheader,nounits",
     ]
     returncode, stdout, stderr = _run_command(command)
@@ -137,6 +152,7 @@ def _capture_nvidia_smi() -> dict[str, Any]:
         try:
             parsed = _parse_nvidia_smi(stdout)
             records = [_to_dict_safe(record) for record in parsed]
+            stderr = stderr or ""
         except Exception as error:  # pragma: no cover - defensive
             stderr = (stderr + "\n" if stderr else "") + f"parse_error: {error}"
     return {
@@ -156,6 +172,18 @@ def _try_parse_int(value: str | None) -> Optional[int]:
         return None
     try:
         return int(value)
+    except ValueError:
+        return None
+
+
+def _try_parse_float(value: str | None) -> Optional[float]:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return float(value)
     except ValueError:
         return None
 

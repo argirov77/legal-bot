@@ -396,7 +396,10 @@ class TransformersLLM(LLM):
 
             tokenizer_started = time.perf_counter()
             try:
-                tokenizer = AutoTokenizer.from_pretrained(self._config.model_path)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self._config.model_path,
+                    use_fast=True,
+                )
                 if (
                     tokenizer.pad_token_id is None
                     and tokenizer.eos_token_id is not None
@@ -479,18 +482,41 @@ class TransformersLLM(LLM):
             LOGGER.warning("LLM not fully initialised; returning stub response")
             return self._stub.generate(prompt, max_tokens, temperature)
 
-        effective_max_tokens = max_tokens if max_tokens and max_tokens > 0 else 256
+        prompt_text = self._build_prompt(prompt)
+        effective_max_tokens = int(max_tokens if max_tokens and max_tokens > 0 else 256)
         do_sample = temperature > 0.0
 
         try:
+            model_ctx = getattr(self._model.config, "max_position_embeddings", None)
+            tokenizer_ctx = getattr(self._tokenizer, "model_max_length", None)
+
+            def _cap_ctx(value: object, default: int = 8192) -> int:
+                try:
+                    if value is None:
+                        return default
+                    as_int = int(value)
+                except Exception:
+                    return default
+                if as_int <= 0 or as_int >= 1_000_000:
+                    return default
+                return as_int
+
+            ctx_window = _cap_ctx(model_ctx, default=8192)
+            tok_window = _cap_ctx(tokenizer_ctx, default=ctx_window)
+            min_ctx = min(ctx_window, tok_window)
+            available_ctx = max(256, min_ctx - effective_max_tokens)
+            max_input_tokens = max(16, min(available_ctx, min_ctx))
+
             tokenizer_inputs = self._tokenizer(
-                self._build_prompt(prompt),
+                prompt_text,
                 return_tensors="pt",
                 truncation=True,
-                max_length=getattr(self._tokenizer, "model_max_length", 4096),
+                max_length=max_input_tokens,
             )
             if torch is not None:
-                tokenizer_inputs = tokenizer_inputs.to(self._inference_device)
+                tokenizer_inputs = {
+                    key: value.to(self._inference_device) for key, value in tokenizer_inputs.items()
+                }
 
             output_ids = self._model.generate(
                 **tokenizer_inputs,
