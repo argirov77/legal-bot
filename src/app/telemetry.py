@@ -13,9 +13,10 @@ import time
 import traceback
 import shutil
 from contextlib import contextmanager
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional, Dict
 
 
 LOGGER = logging.getLogger("app.telemetry")
@@ -109,6 +110,21 @@ def _parse_nvidia_smi(output: str) -> list[NvidiaSMIRecord]:
     return records
 
 
+def _to_dict_safe(obj: Any) -> Dict[str, Any]:
+    """Convert Nvidia SMI record to a dictionary without raising."""
+
+    try:
+        if dataclasses.is_dataclass(obj):
+            return dataclasses.asdict(obj)
+        if hasattr(obj, "_asdict"):
+            return obj._asdict()  # type: ignore[call-arg]
+        if hasattr(obj, "__dict__"):
+            return vars(obj)
+        return {"value": str(obj)}
+    except Exception as error:  # pragma: no cover - defensive
+        return {"error": f"to_dict_failed: {error}", "value": str(obj)}
+
+
 def _capture_nvidia_smi() -> dict[str, Any]:
     command = [
         "nvidia-smi",
@@ -118,7 +134,11 @@ def _capture_nvidia_smi() -> dict[str, Any]:
     returncode, stdout, stderr = _run_command(command)
     records = None
     if returncode == 0 and stdout:
-        records = [record.__dict__ for record in _parse_nvidia_smi(stdout)]
+        try:
+            parsed = _parse_nvidia_smi(stdout)
+            records = [_to_dict_safe(record) for record in parsed]
+        except Exception as error:  # pragma: no cover - defensive
+            stderr = (stderr + "\n" if stderr else "") + f"parse_error: {error}"
     return {
         "command": command,
         "returncode": returncode,
@@ -236,7 +256,13 @@ def _read_proc_mounts(max_entries: int = 20) -> list[str]:
 
 
 def emit_gpu_runtime_check() -> dict[str, Any]:
-    snapshot = _capture_nvidia_smi()
+    try:
+        snapshot = _capture_nvidia_smi()
+    except Exception as error:  # pragma: no cover - defensive
+        details = {"error": str(error)}
+        log_event(LOGGER, "gpu.runtime_check.exception", level="warning", details=details)
+        return {"records": None, "returncode": -1, "stderr": f"exception: {error}"}
+
     details = {
         "records": snapshot.get("records"),
         "returncode": snapshot.get("returncode"),
