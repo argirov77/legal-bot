@@ -4,8 +4,7 @@ services:
       context: .
       target: app
       args:
-        INSTALL_HEAVY: ${INSTALL_HEAVY:-false}
-        # (опционально) если хочешь тащить CUDA-колёсики PyTorch на этапе сборки
+        INSTALL_HEAVY: ${INSTALL_HEAVY:-true}
         USE_CUDA: ${USE_CUDA:-true}
     container_name: legal-bot-app
     env_file:
@@ -17,14 +16,14 @@ services:
       - ./chroma_db:/chroma_db
       - ./src:/app/src
     environment:
-      INSTALL_HEAVY: ${INSTALL_HEAVY:-false}
+      INSTALL_HEAVY: ${INSTALL_HEAVY:-true}
+      USE_CUDA: ${USE_CUDA:-true}
       FORCE_LOAD_ON_START: ${FORCE_LOAD_ON_START:-false}
-      # если хочешь эмбеддинги тоже на GPU:
-      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cuda}
-      # не обязательно, но полезно
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-    gpus: all                        # ← ЭТО ГЛАВНОЕ
+      HF_HOME: /models
+      LLM_DEVICE: ${LLM_DEVICE:-cuda}
+      LLM_MODEL_PATH: ${LLM_MODEL_PATH:-/models/bgpt-7b}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+    gpus: all
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/healthz || exit 1"]
