@@ -11,10 +11,14 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from app.telemetry import (
+    emit_gpu_runtime_check,
+    emit_gpu_torch_check,
     emit_cuda_error,
     emit_exception,
     emit_llm_provider_init,
     emit_model_load_start,
+    emit_model_load_progress,
+    emit_model_load_error,
     emit_model_load_success,
     emit_model_path_inspection,
     emit_model_permissions,
@@ -48,6 +52,7 @@ MODEL_PATH_ENV_KEYS: tuple[str, str, str] = (
 )
 
 _INSPECTED_PATHS: set[str] = set()
+_GPU_DIAGNOSTICS_EMITTED = False
 
 SYSTEM_PROMPT_BG = (
     "You are a legal assistant. Answer in Bulgarian, use only provided sources. "
@@ -222,12 +227,16 @@ def _log_memory_snapshot(device_label: str) -> None:
         )
 
 
+def _cpu_device_map() -> tuple[object, str]:
+    return {"": "cpu"}, "cpu"
+
+
 def _single_device_map() -> tuple[object, str]:
     if torch is None or not torch.cuda.is_available():  # pragma: no cover - depends on hw
         LOGGER.warning(
             "CUDA is not available; loading the LLM on CPU. Expect slower responses."
         )
-        return {"": "cpu"}, "cpu"
+        return _cpu_device_map()
     return {"": "cuda:0"}, "cuda:0"
 
 
@@ -236,8 +245,17 @@ def _auto_device_map() -> tuple[object, str]:
         LOGGER.warning(
             "device_map=auto requested but GPU is not available; falling back to CPU."
         )
-        return {"": "cpu"}, "cpu"
+        return _cpu_device_map()
     return "auto", "cuda:auto"
+
+
+def _sequential_device_map() -> tuple[object, str]:
+    if torch is None or not torch.cuda.is_available():  # pragma: no cover - depends on hw
+        LOGGER.warning(
+            "device_map=sequential requested but GPU is not available; falling back to CPU."
+        )
+        return _cpu_device_map()
+    return "sequential", "cuda:sequential"
 
 
 def _resolve_device_map(strategy: str) -> tuple[object, str]:
@@ -258,7 +276,7 @@ def _resolve_device_map(strategy: str) -> tuple[object, str]:
     return _single_device_map()
 
 
-def _resolve_device_strategy() -> str:
+def _resolve_device_strategy(use_gpu: bool) -> str:
     explicit_device = os.getenv("LLM_DEVICE")
     if explicit_device:
         normalised = explicit_device.strip().lower()
@@ -271,7 +289,44 @@ def _resolve_device_strategy() -> str:
     map_from_env = os.getenv("LLM_DEVICE_MAP")
     if map_from_env:
         return map_from_env
-    return "single"
+    return "auto" if use_gpu else "single"
+
+
+def _resolve_device_candidates(strategy: str, *, use_gpu: bool) -> list[tuple[object, str]]:
+    if not use_gpu:
+        return [_cpu_device_map()]
+
+    normalised = strategy.strip().lower()
+    candidates: list[tuple[object, str]] = []
+
+    if normalised == "auto":
+        candidates.append(_auto_device_map())
+        candidates.append(_sequential_device_map())
+    elif normalised in {"sequential", "balanced"}:
+        candidates.append(_sequential_device_map())
+        candidates.append(_auto_device_map())
+    elif normalised in {"single", "single:0", "single_gpu"}:
+        candidates.append(_single_device_map())
+    else:
+        candidates.append(_resolve_device_map(strategy))
+        if normalised not in {"auto", "sequential"}:
+            candidates.append(_auto_device_map())
+            candidates.append(_sequential_device_map())
+
+    # Deduplicate while preserving order
+    deduped: list[tuple[object, str]] = []
+    seen: set[str] = set()
+    for device_map, label in candidates:
+        key = f"{label}:{device_map}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((device_map, label))
+
+    if not any(label == "cpu" for _, label in deduped):
+        deduped.append(_cpu_device_map())
+
+    return deduped
 
 
 @dataclass(slots=True)
@@ -280,6 +335,7 @@ class _LLMConfig:
     device_strategy: str
     torch_dtype: Optional["torch.dtype"]
     quantization: Optional[str]
+    use_gpu: bool
 
 
 class TransformersLLM(LLM):
@@ -331,13 +387,27 @@ class TransformersLLM(LLM):
                     "PyTorch/Transformers are not available in the current environment"
                 ) from base_error
 
-            device_map, device_label = _resolve_device_map(self._config.device_strategy)
+            global _GPU_DIAGNOSTICS_EMITTED
+            if not _GPU_DIAGNOSTICS_EMITTED:
+                emit_gpu_runtime_check()
+                emit_gpu_torch_check()
+                _GPU_DIAGNOSTICS_EMITTED = True
+
             dtype = self._config.torch_dtype
             dtype_label = getattr(dtype, "name", str(dtype)) if dtype is not None else "auto"
-            candidates: list[tuple[object, str]] = [(device_map, device_label)]
-            cpu_candidate: tuple[object, str] = ({"": "cpu"}, "cpu")
-            if all(label != "cpu" for _, label in candidates):
-                candidates.append(cpu_candidate)
+            candidates = _resolve_device_candidates(
+                self._config.device_strategy, use_gpu=self._config.use_gpu
+            )
+            total_attempts = len(candidates)
+            candidate_maps = [_format_device_map(map_candidate) for map_candidate, _ in candidates]
+            emit_model_load_progress(
+                stage="init",
+                attempt=0,
+                total=total_attempts,
+                device_map=candidate_maps,
+                dtype=dtype_label,
+                use_gpu=self._config.use_gpu,
+            )
 
             if self._config.quantization:
                 LOGGER.warning(
@@ -350,7 +420,16 @@ class TransformersLLM(LLM):
             successful_map: object | None = None
             load_started = time.perf_counter()
             emit_model_shard_map(self._config.model_path)
-            for current_map, current_label in candidates:
+            attempt_index = 0
+            for attempt_index, (current_map, current_label) in enumerate(candidates, start=1):
+                emit_model_load_progress(
+                    stage="attempt_start",
+                    attempt=attempt_index,
+                    total=total_attempts,
+                    device_map=_format_device_map(current_map),
+                    dtype=dtype_label,
+                    use_gpu=self._config.use_gpu,
+                )
                 LOGGER.info(
                     "trying to load LLM from %s (device_map=%s, dtype=%s, low_cpu_mem_usage=True)",
                     self._config.model_path,
@@ -384,6 +463,15 @@ class TransformersLLM(LLM):
                         emit_cuda_error(error, snapshot=None)
                     else:
                         emit_exception(module=__name__, error=error)
+                    emit_model_load_progress(
+                        stage="attempt_error",
+                        attempt=attempt_index,
+                        total=total_attempts,
+                        device_map=_format_device_map(current_map),
+                        dtype=dtype_label,
+                        use_gpu=self._config.use_gpu,
+                        error=error,
+                    )
                     continue
 
                 self._device_label = current_label
@@ -393,12 +481,33 @@ class TransformersLLM(LLM):
                     else "cpu"
                 )
                 successful_map = current_map
+                emit_model_load_progress(
+                    stage="attempt_success",
+                    attempt=attempt_index,
+                    total=total_attempts,
+                    device_map=_format_device_map(current_map),
+                    dtype=dtype_label,
+                    use_gpu=self._config.use_gpu,
+                )
                 break
 
             if model is None:
-                last_label, last_error = errors[-1] if errors else ("unknown", RuntimeError("Unknown load failure"))
+                last_label, last_error = (
+                    errors[-1] if errors else ("unknown", RuntimeError("Unknown load failure"))
+                )
                 self._load_error = last_error
                 self._stub.update_reason(f"Failed to load model on {last_label}: {last_error}")
+                emit_model_load_error(
+                    model_path=self._config.model_path,
+                    attempts=total_attempts,
+                    errors=[
+                        {
+                            "device": label,
+                            "error": str(err),
+                        }
+                        for label, err in errors
+                    ],
+                )
                 raise LLMNotReadyError("Failed to load the language model") from last_error
 
             tokenizer_started = time.perf_counter()
@@ -458,6 +567,14 @@ class TransformersLLM(LLM):
                 params=params,
                 peak_memory_mb=None,
                 config=config_payload,
+            )
+            emit_model_load_progress(
+                stage="complete",
+                attempt=attempt_index,
+                total=total_attempts,
+                device_map=_format_device_map(successful_map or {}),
+                dtype=dtype_label,
+                use_gpu=self._config.use_gpu,
             )
 
     def _build_prompt(self, user_prompt: str) -> str:
@@ -600,7 +717,8 @@ def _build_config() -> Optional[_LLMConfig]:
     model_path = _resolve_model_path_from_env()
     if not model_path:
         return None
-    device_strategy = _resolve_device_strategy()
+    use_gpu = _env_flag("USE_GPU")
+    device_strategy = _resolve_device_strategy(use_gpu)
     torch_dtype = _resolve_dtype(os.getenv("LLM_TORCH_DTYPE", "float16"))
     quantization = os.getenv("LLM_QUANT")
     return _LLMConfig(
@@ -608,6 +726,7 @@ def _build_config() -> Optional[_LLMConfig]:
         device_strategy=device_strategy,
         torch_dtype=torch_dtype,
         quantization=quantization,
+        use_gpu=use_gpu,
     )
 
 

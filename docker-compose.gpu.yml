@@ -1,17 +1,24 @@
+# docker-compose.gpu.yml
 services:
   app:
-    extends:
-      file: docker-compose.yml
-      service: app
     build:
-      target: heavy
-      args:
-        INSTALL_HEAVY: "true"
+      context: .
+      dockerfile: Dockerfile
+    image: legal-bot-app:latest
+    # fallback runtime и device_requests — оба указаны,
+    # чтобы покрыть разные версии docker/compose
+    runtime: nvidia
     device_requests:
       - driver: nvidia
-        count: all
-        capabilities:
-          - gpu
-    runtime: nvidia
+        count: 1
+        capabilities: ["gpu"]
     environment:
-      INSTALL_HEAVY: "true"
+      - USE_GPU=true
+      - FORCE_LOAD_ON_START=true
+      - CHROMA_PERSIST_DIR=/chroma_db
+    volumes:
+      - ./models:/models
+      - ./chroma_db:/chroma_db
+      - ./src:/app/src
+    ports:
+      - "8000:8000"

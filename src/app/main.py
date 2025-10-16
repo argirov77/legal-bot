@@ -21,6 +21,7 @@ from app.telemetry import (
     emit_container_context,
     emit_env_versions,
     emit_gpu_detection,
+    collect_gpu_debug_snapshot,
     emit_resources_snapshot,
 )
 
@@ -32,6 +33,10 @@ LOGGER = logging.getLogger(__name__)
 
 app = FastAPI(title="Legal Bot API")
 app.include_router(rag_router)
+
+
+def _is_dev_environment() -> bool:
+    return os.getenv("ENVIRONMENT", "development").strip().lower() not in {"prod", "production"}
 
 
 @app.on_event("startup")
@@ -153,6 +158,21 @@ def model_status() -> dict[str, object]:
     if status.error:
         payload["reason"] = status.error
     return payload
+
+
+@app.get("/debug/gpu")
+def debug_gpu() -> dict[str, Any]:
+    """Expose GPU diagnostics in development environments only."""
+
+    if not _is_dev_environment():
+        raise HTTPException(status_code=404, detail="Not found")
+
+    snapshot = collect_gpu_debug_snapshot()
+    snapshot["env"] = {
+        "USE_GPU": os.getenv("USE_GPU"),
+        "FORCE_LOAD_ON_START": os.getenv("FORCE_LOAD_ON_START"),
+    }
+    return snapshot
 
 
 class QueryRequest(BaseModel):
