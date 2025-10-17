@@ -1,9 +1,10 @@
 import logging
 import os
+from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.api.rag import router as rag_router
@@ -30,6 +31,8 @@ from app.telemetry import (
 configure_logging()
 
 LOGGER = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(title="Legal Bot API")
 app.include_router(rag_router)
@@ -77,6 +80,16 @@ def _get_vector_store_or_503() -> ChunkVectorStore:
 def read_root() -> str:
     """Healthcheck endpoint for the service."""
     return "ok"
+
+
+@app.get("/ui", response_class=HTMLResponse)
+def serve_ui() -> FileResponse:
+    """Serve the static HTML interface for interacting with the API."""
+
+    index_path = STATIC_DIR / "index.html"
+    if not index_path.exists():  # pragma: no cover - defensive guard
+        raise HTTPException(status_code=404, detail="UI is not available")
+    return FileResponse(index_path, media_type="text/html")
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
