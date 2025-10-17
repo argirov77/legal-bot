@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -199,6 +200,58 @@ def _resolve_llm_device() -> str:
     return "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
 
 
+def _resolve_device_map(use_cuda: bool) -> object:
+    """Return the effective device map for model loading."""
+
+    if not use_cuda:
+        return "cpu"
+
+    raw_value = os.getenv("LLM_DEVICE_MAP")
+    if raw_value is None:
+        return "auto"
+
+    value = raw_value.strip().lower()
+    if not value:
+        return "auto"
+
+    if value in {"auto", "balanced", "balanced_low_0", "sequential"}:
+        return value
+
+    if value in {"single", "cuda", "cuda0", "cuda:0", "gpu0", "gpu:0"}:
+        return {"": 0}
+
+    if value == "cpu":
+        return "cpu"
+
+    if value.startswith("cuda:"):
+        try:
+            index = int(value.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return {"": value}
+        return {"": index}
+
+    if value.isdigit():
+        return {"": int(value)}
+
+    return value
+
+
+def _device_label_from_map(device: str, device_map: object) -> str:
+    """Derive a human-readable device label from the configured map."""
+
+    if isinstance(device_map, Mapping) and len(device_map) == 1:
+        target = next(iter(device_map.values()))
+        if isinstance(target, int):
+            return f"cuda:{target}"
+        if isinstance(target, str):
+            return target
+
+    if isinstance(device_map, str) and device_map.startswith("cuda"):
+        return device_map
+
+    return device
+
+
 def _log_memory_snapshot(device_label: str) -> None:
     if torch is None:
         return
@@ -284,7 +337,7 @@ class TransformersLLM(LLM):
 
             device = _resolve_llm_device()
             use_cuda = device == "cuda"
-            device_map: object = "auto" if use_cuda else "cpu"
+            device_map: object = _resolve_device_map(use_cuda)
             torch_dtype: object = "auto" if use_cuda else torch.float32
             dtype_label = str(torch_dtype)
             total_attempts = 1
@@ -380,7 +433,7 @@ class TransformersLLM(LLM):
             except Exception:  # pragma: no cover - defensive guard
                 pass
 
-            self._device_label = device
+            self._device_label = _device_label_from_map(device, device_map)
             self._inference_device = (
                 "cuda:0" if use_cuda and torch.cuda.is_available() else "cpu"
             )
