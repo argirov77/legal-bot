@@ -120,6 +120,12 @@
         color: #dc2626;
       }
 
+      .hint {
+        margin: 0;
+        color: #64748b;
+        font-size: 0.85rem;
+      }
+
       .result,
       .sources {
         font-family: "JetBrains Mono", "Fira Mono", Consolas, monospace;
@@ -167,6 +173,23 @@
     </header>
 
     <main>
+      <section id="connection-section">
+        <h2>Настройки соединения</h2>
+        <label>
+          Адрес API
+          <input
+            type="text"
+            id="api-base-url"
+            placeholder="http://10.3.1.101:8000"
+            autocomplete="off"
+          />
+        </label>
+        <p class="hint">
+          Укажите адрес сервиса в локальной сети. Значение сохраняется в браузере и
+          используется для всех запросов.
+        </p>
+      </section>
+
       <section id="ingest-section">
         <h2>Загрузка документов</h2>
         <form id="ingest-form">
@@ -216,12 +239,68 @@
     </main>
 
     <footer>
-      UI обращается к локальному API FastAPI. Убедитесь, что сервис запущен на
-      <code>http://localhost:8000</code>.
+      UI обращается к API FastAPI по адресу, указанному в блоке «Настройки
+      соединения». Убедитесь, что сервис доступен в локальной сети.
     </footer>
 
     <script>
-      const apiBaseUrl = window.location.origin;
+      const DEFAULT_API_BASE_URL = window.location.origin;
+      const LOCAL_STORAGE_KEY = "legalbot.apiBaseUrl";
+
+      const apiBaseUrlInput = document.getElementById("api-base-url");
+
+      function getStoredApiBaseUrl() {
+        try {
+          return localStorage.getItem(LOCAL_STORAGE_KEY);
+        } catch (error) {
+          console.warn("Не удалось получить адрес API из localStorage", error);
+          return null;
+        }
+      }
+
+      function persistApiBaseUrl(value) {
+        try {
+          if (value === DEFAULT_API_BASE_URL) {
+            localStorage.removeItem(LOCAL_STORAGE_KEY);
+          } else {
+            localStorage.setItem(LOCAL_STORAGE_KEY, value);
+          }
+        } catch (error) {
+          console.warn("Не удалось сохранить адрес API в localStorage", error);
+        }
+      }
+
+      const storedApiBaseUrl = getStoredApiBaseUrl();
+
+      let apiBaseUrl = DEFAULT_API_BASE_URL;
+
+      function normaliseApiBaseUrl(value) {
+        const trimmed = (value || "").trim();
+        if (!trimmed) {
+          return DEFAULT_API_BASE_URL;
+        }
+
+        // Удаляем завершающий слэш, чтобы избежать двойных слэшей при запросах.
+        return trimmed.replace(/\/+$/, "");
+      }
+
+      function applyApiBaseUrl(value) {
+        apiBaseUrl = normaliseApiBaseUrl(value);
+
+        persistApiBaseUrl(apiBaseUrl);
+
+        apiBaseUrlInput.value = apiBaseUrl;
+      }
+
+      applyApiBaseUrl(storedApiBaseUrl || DEFAULT_API_BASE_URL);
+
+      apiBaseUrlInput.addEventListener("change", (event) => {
+        applyApiBaseUrl(event.target.value);
+      });
+
+      apiBaseUrlInput.addEventListener("blur", (event) => {
+        applyApiBaseUrl(event.target.value);
+      });
 
       function formatError(error) {
         if (typeof error === "string") {
