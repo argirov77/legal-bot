@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Legal Bot UI</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+        line-height: 1.5;
+        background-color: #f3f4f6;
+        color: #0f172a;
+      }
+
+      body {
+        margin: 0;
+        padding: 2rem;
+        display: flex;
+        flex-direction: column;
+        gap: 2rem;
+        min-height: 100vh;
+      }
+
+      header {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        max-width: 960px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 2rem;
+        color: #1d4ed8;
+      }
+
+      p.description {
+        margin: 0;
+        color: #475569;
+      }
+
+      main {
+        display: grid;
+        gap: 2rem;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+
+      section {
+        background: white;
+        border-radius: 16px;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
+        padding: 1.75rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        border: 1px solid rgba(37, 99, 235, 0.08);
+      }
+
+      section h2 {
+        margin: 0;
+        font-size: 1.5rem;
+        color: #0f172a;
+      }
+
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        font-weight: 600;
+        color: #1e293b;
+        font-size: 0.95rem;
+      }
+
+      input[type="text"],
+      input[type="number"],
+      textarea,
+      input[type="file"] {
+        padding: 0.6rem 0.8rem;
+        border-radius: 12px;
+        border: 1px solid #cbd5f5;
+        font-size: 1rem;
+        background: rgba(248, 250, 252, 0.9);
+      }
+
+      textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+
+      button {
+        align-self: flex-start;
+        padding: 0.7rem 1.4rem;
+        border-radius: 999px;
+        border: none;
+        background: linear-gradient(135deg, #2563eb, #6366f1);
+        color: white;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.15s ease, box-shadow 0.2s ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 15px 30px rgba(99, 102, 241, 0.25);
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        box-shadow: none;
+      }
+
+      .status {
+        font-size: 0.9rem;
+        color: #2563eb;
+      }
+
+      .error {
+        color: #dc2626;
+      }
+
+      .result,
+      .sources {
+        font-family: "JetBrains Mono", "Fira Mono", Consolas, monospace;
+        font-size: 0.9rem;
+        background: #f1f5f9;
+        border-radius: 12px;
+        padding: 1rem;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .sources ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      footer {
+        margin-top: auto;
+        font-size: 0.85rem;
+        color: #64748b;
+      }
+
+      @media (max-width: 600px) {
+        body {
+          padding: 1.5rem;
+        }
+
+        main {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Legal Bot — графический интерфейс</h1>
+      <p class="description">
+        Загрузите документы, чтобы построить базу знаний, и задайте вопрос модели
+        через удобный интерфейс.
+      </p>
+    </header>
+
+    <main>
+      <section id="ingest-section">
+        <h2>Загрузка документов</h2>
+        <form id="ingest-form">
+          <label>
+            Идентификатор сессии
+            <input type="text" id="ingest-session" value="demo-session" required />
+          </label>
+          <label>
+            Файлы для загрузки
+            <input type="file" id="ingest-files" multiple required />
+          </label>
+          <button type="submit">Загрузить</button>
+          <div class="status" id="ingest-status"></div>
+        </form>
+      </section>
+
+      <section id="query-section">
+        <h2>Получить ответ</h2>
+        <form id="query-form">
+          <label>
+            Идентификатор сессии
+            <input type="text" id="query-session" value="demo-session" required />
+          </label>
+          <label>
+            Вопрос
+            <textarea id="query-question" placeholder="О чём документ?" required></textarea>
+          </label>
+          <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+            <label style="flex: 1 1 120px;">
+              Top K
+              <input type="number" id="query-top-k" value="3" min="1" max="20" required />
+            </label>
+            <label style="flex: 1 1 120px;">
+              Max tokens
+              <input type="number" id="query-max-tokens" placeholder="128" min="1" max="2048" />
+            </label>
+          </div>
+          <button type="submit">Задать вопрос</button>
+          <div class="status" id="query-status"></div>
+        </form>
+        <div class="result" id="answer-container" hidden></div>
+        <div class="sources" id="sources-container" hidden>
+          <strong>Источники:</strong>
+          <ul id="sources-list"></ul>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      UI обращается к локальному API FastAPI. Убедитесь, что сервис запущен на
+      <code>http://localhost:8000</code>.
+    </footer>
+
+    <script>
+      const apiBaseUrl = window.location.origin;
+
+      function formatError(error) {
+        if (typeof error === "string") {
+          return error;
+        }
+        if (error && typeof error === "object" && "detail" in error) {
+          return Array.isArray(error.detail)
+            ? error.detail.map((item) => item.msg || JSON.stringify(item)).join("; ")
+            : error.detail;
+        }
+        return "Неизвестная ошибка";
+      }
+
+      async function ingestDocuments(event) {
+        event.preventDefault();
+        const status = document.getElementById("ingest-status");
+        status.textContent = "Загружаем документы…";
+        status.classList.remove("error");
+
+        const sessionId = document.getElementById("ingest-session").value.trim();
+        const filesInput = document.getElementById("ingest-files");
+
+        if (!sessionId || filesInput.files.length === 0) {
+          status.textContent = "Укажите сессию и выберите хотя бы один файл";
+          status.classList.add("error");
+          return;
+        }
+
+        const formData = new FormData();
+        Array.from(filesInput.files).forEach((file) => {
+          formData.append("files", file);
+        });
+
+        try {
+          const response = await fetch(`${apiBaseUrl}/sessions/${encodeURIComponent(sessionId)}/ingest`, {
+            method: "POST",
+            body: formData,
+          });
+
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw payload;
+          }
+
+          const durationSeconds =
+            typeof payload.duration_seconds === "number"
+              ? payload.duration_seconds.toFixed(2)
+              : "-";
+
+          status.textContent = `Добавлено фрагментов: ${payload.added_chunks}. Время: ${durationSeconds} сек.`;
+          filesInput.value = "";
+        } catch (err) {
+          status.textContent = formatError(err);
+          status.classList.add("error");
+        }
+      }
+
+      async function queryDocuments(event) {
+        event.preventDefault();
+        const status = document.getElementById("query-status");
+        status.textContent = "Запрашиваем ответ…";
+        status.classList.remove("error");
+
+        const sessionId = document.getElementById("query-session").value.trim();
+        const question = document.getElementById("query-question").value.trim();
+        const topK = parseInt(document.getElementById("query-top-k").value, 10);
+        const maxTokensRaw = document.getElementById("query-max-tokens").value;
+        const maxTokens = maxTokensRaw ? parseInt(maxTokensRaw, 10) : null;
+
+        if (!sessionId || !question) {
+          status.textContent = "Необходимо указать сессию и вопрос";
+          status.classList.add("error");
+          return;
+        }
+
+        try {
+          const response = await fetch(`${apiBaseUrl}/sessions/${encodeURIComponent(sessionId)}/query`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              question,
+              top_k: topK,
+              max_tokens: maxTokens,
+            }),
+          });
+
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw payload;
+          }
+
+          status.textContent = "Ответ получен";
+
+          const answerContainer = document.getElementById("answer-container");
+          answerContainer.hidden = false;
+          answerContainer.textContent = payload.answer || "Ответ отсутствует";
+
+          const sourcesContainer = document.getElementById("sources-container");
+          const sourcesList = document.getElementById("sources-list");
+          sourcesList.innerHTML = "";
+
+          if (Array.isArray(payload.sources) && payload.sources.length > 0) {
+            payload.sources.forEach((source, index) => {
+              const item = document.createElement("li");
+              const meta = source.metadata || {};
+              const title = meta.filename || meta.title || source.id || `Источник ${index + 1}`;
+
+              const titleElement = document.createElement("strong");
+              titleElement.textContent = title;
+              item.appendChild(titleElement);
+              item.appendChild(document.createElement("br"));
+
+              if (meta.score !== undefined) {
+                const scoreSpan = document.createElement("span");
+                scoreSpan.textContent = `score: ${meta.score}`;
+                item.appendChild(scoreSpan);
+                item.appendChild(document.createElement("br"));
+              }
+
+              const contentBlock = document.createElement("div");
+              contentBlock.textContent = source.content;
+              item.appendChild(contentBlock);
+
+              sourcesList.appendChild(item);
+            });
+            sourcesContainer.hidden = false;
+          } else {
+            sourcesContainer.hidden = true;
+          }
+        } catch (err) {
+          status.textContent = formatError(err);
+          status.classList.add("error");
+          document.getElementById("answer-container").hidden = true;
+          document.getElementById("sources-container").hidden = true;
+        }
+      }
+
+      document.getElementById("ingest-form").addEventListener("submit", ingestDocuments);
+      document.getElementById("query-form").addEventListener("submit", queryDocuments);
+    </script>
+  </body>
+</html>
