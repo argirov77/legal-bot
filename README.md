@@ -297,7 +297,7 @@ PY
 | `LLM_PROVIDER`          | Провайдер LLM (`transformers`, `mock`)                                     |
 | `LLM_MODEL_PATH`        | Путь к каталогу локальной LLM модели                                       |
 | `LLM_DEVICE`            | Устройство инференса высокого уровня (`cpu`, `cuda`, `auto`)                |
-| `LLM_DEVICE_MAP`        | Точная стратегия распределения слоёв (`single`, `auto`, `sequential`)       |
+| `LLM_DEVICE_MAP`        | Точная стратегия распределения слоёв (`single` фиксирует модель на `cuda:0`) |
 | `LLM_TORCH_DTYPE`       | Тип тензоров для загрузки модели (`float16`, `bfloat16`, `float32`)         |
 | `LLM_QUANT`             | Строковый маркер квантования (например, `bnb-4bit`)                         |
 | `LLM_MAX_TOKENS`        | Количество новых токенов, генерируемых по умолчанию                        |
